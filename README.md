@@ -28,6 +28,7 @@ The editor on the right side of the interface always reflects the currently sele
 * **CANCEL** – revert edits
 * **ADD** – create a new entry
 * **COPY** – copy the raw BibTeX
+* **UNDO** – revert last change
 
 Clearing the editor and saving deletes the entry.
 

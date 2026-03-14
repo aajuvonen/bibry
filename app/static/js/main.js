@@ -16,6 +16,9 @@ let searchInput = null;
 
 let sortDir = "desc";
 let viewMode = "grid"; // "grid" or "list"
+let renderToken = 0;
+
+const RENDER_BATCH_SIZE = 80;
 
 async function loadEntries() {
   allEntries = await fetchEntries();
@@ -54,15 +57,12 @@ function renderGrid() {
   grid.style.display = "";
 
   grid.innerHTML = "";
-  const frag = document.createDocumentFragment();
-
-  for (const e of filteredEntries) {
+  const token = ++renderToken;
+  renderInBatches(filteredEntries, grid, token, (e) => {
     const card = createCard(e);
     card.addEventListener("click", () => selectEntry(e));
-    frag.appendChild(card);
-  }
-
-  grid.appendChild(frag);
+    return card;
+  });
 }
 
 function renderList() {
@@ -76,13 +76,31 @@ function renderList() {
   list.style.display = "block";
 
   list.innerHTML = "";
-  const frag = document.createDocumentFragment();
+  const token = ++renderToken;
+  renderInBatches(filteredEntries, list, token, createListEntry);
+}
 
-  for (const e of filteredEntries) {
-    frag.appendChild(createListEntry(e));
+function renderInBatches(entries, container, token, buildNode) {
+  let index = 0;
+
+  function appendBatch() {
+    if (token !== renderToken) return;
+
+    const frag = document.createDocumentFragment();
+    const limit = Math.min(index + RENDER_BATCH_SIZE, entries.length);
+
+    for (; index < limit; index += 1) {
+      frag.appendChild(buildNode(entries[index]));
+    }
+
+    container.appendChild(frag);
+
+    if (index < entries.length) {
+      requestAnimationFrame(appendBatch);
+    }
   }
 
-  list.appendChild(frag);
+  requestAnimationFrame(appendBatch);
 }
 
 function createListEntry(entry) {

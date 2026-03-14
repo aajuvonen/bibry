@@ -13,6 +13,42 @@ api_bp = Blueprint('api', __name__)
 
 # Directory for PDFs
 PDF_DIR = bibstore.ROOT / "pdf"
+_ENTRY_CACHE_SIGNATURE = object()
+_ENTRY_CACHE_BASE = None
+
+
+def _build_entry_cache():
+    global _ENTRY_CACHE_SIGNATURE, _ENTRY_CACHE_BASE
+    signature = bibstore.get_bib_signature()
+    if _ENTRY_CACHE_BASE is not None and signature == _ENTRY_CACHE_SIGNATURE:
+        return _ENTRY_CACHE_BASE
+
+    db = bibstore.load_bib()
+    writer = bibtexparser.bwriter.BibTexWriter()
+    cached = []
+
+    for e in db.entries:
+        db2 = bibtexparser.bibdatabase.BibDatabase()
+        db2.entries = [e]
+        raw = writer.write(db2)
+        fields = {
+            k: latex_to_text(v) if isinstance(v, str) else v
+            for k, v in e.items()
+        }
+        cached.append({
+            "key": e.get("ID"),
+            "type": e.get("ENTRYTYPE"),
+            "fields": fields,
+            "raw": raw,
+        })
+
+    _ENTRY_CACHE_SIGNATURE = signature
+    _ENTRY_CACHE_BASE = cached
+    return _ENTRY_CACHE_BASE
+
+
+def warm_entries_cache():
+    _build_entry_cache()
 
 # Endpoint: current version for live refresh
 @api_bp.route("/version")
@@ -22,23 +58,15 @@ def api_version():
 # Endpoint: list all entries (with metadata)
 @api_bp.route("/entries")
 def api_entries():
-    db = bibstore.load_bib()
     pdf_files = {p.stem for p in PDF_DIR.glob("*.pdf")}
     out = []
-    writer = bibtexparser.bwriter.BibTexWriter()
-    for e in db.entries:
-        db2 = bibtexparser.bibdatabase.BibDatabase()
-        db2.entries = [e]
-        raw = writer.write(db2)
-        fields = {k: latex_to_text(v) if isinstance(v,str) else v
-                  for k,v in e.items()}
-
+    for entry in _build_entry_cache():
         out.append({
-            "key": e.get("ID"),
-            "type": e.get("ENTRYTYPE"),
-            "fields": fields,
-            "raw": raw,
-            "has_pdf": e.get("ID") in pdf_files
+            "key": entry["key"],
+            "type": entry["type"],
+            "fields": entry["fields"],
+            "raw": entry["raw"],
+            "has_pdf": entry["key"] in pdf_files
         })
     return jsonify(out)
 

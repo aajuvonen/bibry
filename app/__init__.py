@@ -17,8 +17,14 @@ def create_app():
 
     PDF_DIR.mkdir(exist_ok=True)
 
-    from .api import api_bp
+    from . import bibstore
+    from .api import api_bp, warm_entries_cache
     app.register_blueprint(api_bp, url_prefix="/api")
+
+    # Prime the bibliography cache during app startup so the first UI load
+    # doesn't pay the full parse/serialization cost on demand.
+    bibstore.load_bib()
+    warm_entries_cache()
 
     @app.route("/")
     def index():
