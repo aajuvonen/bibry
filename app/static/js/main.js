@@ -1,7 +1,7 @@
 // static/js/main.js
 // Improved formatting, null-safety, and moved import handler into initUI()
 
-import { fetchEntries } from "./api.js";
+import { fetchEntries, undoLast } from "./api.js";
 import { buildIndex, applyFilters } from "./filters.js";
 import { createCard, getIconClass, extractLatexUrl } from "./renderer.js";
 
@@ -21,6 +21,10 @@ async function loadEntries() {
   allEntries = await fetchEntries();
   buildIndex(allEntries);
   filterAndRender();
+}
+
+function findEntryByKey(key) {
+  return allEntries.find((entry) => entry.key === key) || null;
 }
 
 function getSortField() {
@@ -226,20 +230,36 @@ function selectEntry(entry) {
 }
 
 async function saveEntry() {
-  if (!currentEntry) return;
+  try {
+    if (!currentEntry) return;
 
-  const raw = editor ? editor.value.trim() : "";
-  if (raw === "") {
-    if (!confirm("Delete this entry?")) return;
+    const raw = editor ? editor.value.trim() : "";
+    if (raw === "") {
+      if (!confirm("Delete this entry?")) return;
+    }
+
+    const res = await fetch(`/api/entry/${currentEntry.key}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ raw }),
+    });
+    if (!res.ok) {
+      const message = await res.text();
+      throw new Error(message || "Failed to save entry");
+    }
+
+    const previousKey = currentEntry.key;
+    await loadEntries();
+    currentEntry = findEntryByKey(previousKey);
+    if (currentEntry && editor) {
+      editor.value = currentEntry.raw || "";
+    } else if (editor && raw === "") {
+      editor.value = "";
+    }
+  } catch (err) {
+    console.error("Save failed:", err);
+    alert(err.message || "Failed to save entry");
   }
-
-  await fetch(`/api/entry/${currentEntry.key}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ raw }),
-  });
-
-  await loadEntries();
 }
 
 function cancelEdit() {
@@ -247,19 +267,52 @@ function cancelEdit() {
 }
 
 async function addEntry() {
-  const raw = editor ? editor.value.trim() : "";
-  if (!raw) {
-    alert("No entry content");
-    return;
+  try {
+    const raw = editor ? editor.value.trim() : "";
+    if (!raw) {
+      alert("No entry content");
+      return;
+    }
+
+    const res = await fetch("/api/entry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ raw }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.description || data.error || "Failed to add entry");
+    }
+
+    await loadEntries();
+    currentEntry = findEntryByKey(data.key);
+    if (currentEntry && editor) {
+      editor.value = currentEntry.raw || "";
+    }
+  } catch (err) {
+    console.error("Add failed:", err);
+    alert(err.message || "Failed to add entry");
   }
+}
 
-  await fetch("/api/entry", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ raw }),
-  });
+async function handleUndo() {
+  try {
+    const res = await undoLast();
+    if (res && res.ok) {
+      const selectedKey = currentEntry ? currentEntry.key : null;
+      await loadEntries();
+      currentEntry = selectedKey ? findEntryByKey(selectedKey) : null;
+      if (editor) {
+        editor.value = currentEntry ? currentEntry.raw || "" : "";
+      }
+      return;
+    }
 
-  await loadEntries();
+    throw new Error((res && (res.description || res.error)) || "Undo failed");
+  } catch (err) {
+    console.error("Undo failed:", err);
+    alert(err.message || "Undo failed");
+  }
 }
 
 function copyCurrent() {
@@ -310,6 +363,7 @@ function initUI() {
   getEl("saveBtn")?.addEventListener("click", saveEntry);
   getEl("cancelBtn")?.addEventListener("click", cancelEdit);
   getEl("addBtn")?.addEventListener("click", addEntry);
+  getEl("undoBtn")?.addEventListener("click", handleUndo);
   getEl("copyBtn")?.addEventListener("click", copyCurrent);
 
   const viewToggleBtn = getEl("viewToggleBtn");
@@ -367,5 +421,6 @@ document.addEventListener("DOMContentLoaded", () => {
   initUI();
   loadEntries().catch((err) => {
     console.error("Failed to load entries:", err);
+    alert(err.message || "Failed to load entries");
   });
 });

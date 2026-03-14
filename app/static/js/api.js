@@ -13,5 +13,14 @@ export async function fetchRawEntry(key) {
 
 export async function undoLast() {
   const res = await fetch("/api/undo", { method: "POST" });
-  return await res.json();
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: text };
+    }
+  }
+  return { ok: res.ok, status: res.status, ...data };
 }
