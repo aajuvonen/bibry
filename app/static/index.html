@@ -1,0 +1,47 @@
+<!-- static/index.html -->
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Bibry</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <style>#grid,#list{height:calc(100vh - 110px);overflow-y:auto}body{padding:1rem;background:#f5f5f5}.toolbar input,.toolbar select{height:30px}#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}#list{padding:6px;display:none}.card{padding:12px;margin:6px;background:#fff;border:1px solid #ddd;border-radius:6px;transition:background .15s;cursor:pointer}.card:hover{background:#f8f9fa}.actions{margin-top:6px;display:flex;gap:6px}.toolbar{flex-wrap:wrap}#search{width:220px}#doiInput{width:200px}.btn-group .btn.active{background:#0d6efd;color:#fff;border-color:#0d6efd}#editRaw{font-family:monospace;height:70vh}@media (max-width:768px){#editRaw{height:180px}}
+    </style>
+  </head>
+<body>
+    <div class="container-fluid">
+      <div class="toolbar d-flex flex-wrap align-items-center gap-2 mb-2">
+        <input id="search" class="form-control form-control-sm" placeholder="Search">
+        <div class="btn-group btn-group-sm" role="group">
+          <button class="btn btn-outline-secondary sort-btn active" data-sort="year">Year</button>
+          <button class="btn btn-outline-secondary sort-btn" data-sort="author">Author</button>
+          <button class="btn btn-outline-secondary sort-btn" data-sort="title">Title</button>
+        </div>
+        <button id="sortDirBtn" class="btn btn-sm btn-outline-secondary">↓</button>
+        <button id="viewToggleBtn" class="btn btn-sm btn-outline-secondary">
+          <i class="fa fa-list" aria-hidden="true"></i>
+        </button>
+      </div>
+
+      <div class="row">
+        <div class="col-md-8 order-2 order-md-1">
+          <div id="grid"></div>
+          <div id="list"></div>
+        </div>
+        <div class="col-md-4 order-1 order-md-2">
+          <textarea id="editRaw" class="form-control" style="height:70vh; font-family: monospace;"></textarea>
+          <!-- Editor controls -->
+          <div id="editorControls" class="mt-2 d-flex gap-2">
+            <button id="saveBtn" class="btn btn-sm btn-primary">Save</button>
+            <button id="cancelBtn" class="btn btn-sm btn-secondary">Cancel</button>
+            <button id="addBtn" class="btn btn-sm btn-success">Add</button>
+            <button id="copyBtn" class="btn btn-sm btn-outline-secondary">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="js/main.js"></script>
+  </body>
+</html>
