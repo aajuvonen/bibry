@@ -128,7 +128,7 @@ def api_undo():
         abort(400, "Nothing to undo")
     # Swap current and last states
     current = bibstore.BIBFILE.read_text(encoding="utf-8")
-    bibstore.save_bib_text(bibstore.LAST_BIB_STATE)
+    bibstore.save_bib_text(bibstore.LAST_BIB_STATE, action="undo")
     bibstore.LAST_BIB_STATE = current
     return jsonify({"ok": True})
 
@@ -146,8 +146,8 @@ def api_edit(key):
 
     if raw.strip()=="":
         db.entries = [e for e in db.entries if e.get("ID")!=key]
-        bibstore.save_bib(db)
-        return jsonify({"deleted":True})
+        bibstore.save_bib(db, action="delete-entry")
+        return jsonify({"deleted":True, "key": key})
 
     parser = bibtexparser.bparser.BibTexParser(common_strings=True)
     newdb = bibtexparser.loads(raw, parser=parser)
@@ -160,8 +160,8 @@ def api_edit(key):
     for i,e in enumerate(db.entries):
         if e.get("ID")==key:
             db.entries[i]=new_entry
-            bibstore.save_bib(db)
-            return jsonify({"ok":True})
+            bibstore.save_bib(db, action="update-entry")
+            return jsonify({"ok":True, "key": new_entry.get("ID", key)})
 
     abort(404)
 
@@ -188,7 +188,7 @@ def api_add_entry():
         abort(409, f"Entry '{new_key}' already exists")
 
     db.entries.append(new_entry)
-    bibstore.save_bib(db)
+    bibstore.save_bib(db, action="add-entry")
     return jsonify({"ok": True, "key": new_key}), 201
 
 
@@ -233,7 +233,7 @@ def api_import_entries():
 
     normalized_text, stats = process_bibtex_text(merged_text)
     before_count = len(bibstore.load_bib().entries)
-    bibstore.save_bib_text(normalized_text)
+    bibstore.save_bib_text(normalized_text, action="import")
 
     return jsonify({
         "ok": True,
@@ -259,3 +259,22 @@ def api_export_entries():
     response.headers["Content-Disposition"] = 'attachment; filename="export.bib"'
     response.headers["X-Bibry-Exported-Count"] = str(stats["after_dedupe"])
     return response
+
+
+@api_bp.route("/history")
+def api_history():
+    return jsonify({"items": bibstore.list_history()})
+
+
+@api_bp.route("/history/<revision_id>/restore", methods=["POST"])
+def api_history_restore(revision_id):
+    revision = bibstore.get_history_revision(revision_id)
+    if revision is None:
+        abort(404, "History entry not found")
+
+    bibstore.save_bib_text(revision.get("snapshot", ""), action="history-restore")
+    return jsonify({
+        "ok": True,
+        "revision_id": revision_id,
+        "timestamp": revision.get("timestamp"),
+    })

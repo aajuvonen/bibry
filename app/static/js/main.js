@@ -7,6 +7,8 @@ import {
   previewImportFile,
   importEntries as importSelectedEntries,
   exportEntries as requestExportEntries,
+  fetchHistory,
+  restoreHistory,
 } from "./api.js";
 import { buildIndex, applyFilters } from "./filters.js";
 import { createCard, getIconClass, extractLatexUrl } from "./renderer.js";
@@ -71,7 +73,31 @@ function updatePickerInfo() {
   const info = getEl("pickerSelectionInfo");
   if (!info) return;
   const selectedCount = pickerState.items.filter((item) => item.selected).length;
+  if (pickerState.singleSelect) {
+    info.textContent = selectedCount ? "1 selected" : "No selection";
+    return;
+  }
   info.textContent = `${selectedCount} selected`;
+}
+
+function updatePickerPreview() {
+  const preview = getEl("pickerPreview");
+  const previewLabel = getEl("pickerPreviewLabel");
+  const previewText = getEl("pickerPreviewText");
+  if (!preview || !previewLabel || !previewText) return;
+
+  if (!pickerState || !pickerState.showPreview) {
+    preview.classList.remove("open");
+    previewLabel.textContent = "";
+    previewText.textContent = "";
+    return;
+  }
+
+  const selectedItem = pickerState.items.find((item) => item.selected) || null;
+  const text = selectedItem ? (selectedItem.preview || pickerState.previewEmptyText || "") : "";
+  preview.classList.add("open");
+  previewLabel.textContent = pickerState.previewLabel || "";
+  previewText.textContent = text || pickerState.previewEmptyText || "";
 }
 
 function renderPickerList() {
@@ -88,6 +114,7 @@ function renderPickerList() {
     empty.textContent = pickerState.emptyMessage || "No entries found.";
     list.appendChild(empty);
     updatePickerInfo();
+    updatePickerPreview();
     return;
   }
 
@@ -110,8 +137,13 @@ function renderPickerList() {
     const checkbox = row.querySelector("input");
     checkbox.checked = Boolean(item.selected);
     checkbox.addEventListener("change", () => {
+      if (pickerState?.singleSelect && checkbox.checked) {
+        for (const candidate of pickerState.items) {
+          candidate.selected = false;
+        }
+      }
       item.selected = checkbox.checked;
-      updatePickerInfo();
+      renderPickerList();
     });
 
     frag.appendChild(row);
@@ -119,6 +151,7 @@ function renderPickerList() {
 
   list.appendChild(frag);
   updatePickerInfo();
+  updatePickerPreview();
 }
 
 function closePicker() {
@@ -130,6 +163,7 @@ function closePicker() {
   }
   const search = getEl("pickerSearch");
   if (search) search.value = "";
+  updatePickerPreview();
 }
 
 function openPicker(config) {
@@ -142,6 +176,10 @@ function openPicker(config) {
     items: config.items,
     query: "",
     onConfirm: config.onConfirm,
+    singleSelect: Boolean(config.singleSelect),
+    showPreview: Boolean(config.showPreview),
+    previewLabel: config.previewLabel || "",
+    previewEmptyText: config.previewEmptyText || "",
   };
 
   const backdrop = getEl("pickerBackdrop");
@@ -149,11 +187,19 @@ function openPicker(config) {
   const subtitle = getEl("pickerSubtitle");
   const search = getEl("pickerSearch");
   const confirmBtn = getEl("pickerConfirmBtn");
+  const selectVisibleBtn = getEl("pickerSelectVisibleBtn");
+  const clearBtn = getEl("pickerClearBtn");
 
   if (title) title.textContent = pickerState.title;
   if (subtitle) subtitle.textContent = pickerState.subtitle;
   if (search) search.value = "";
   if (confirmBtn) confirmBtn.textContent = pickerState.confirmText;
+  if (selectVisibleBtn) {
+    selectVisibleBtn.style.display = pickerState.singleSelect ? "none" : "";
+  }
+  if (clearBtn) {
+    clearBtn.textContent = pickerState.singleSelect ? "Clear Selection" : "Clear";
+  }
   if (backdrop) {
     backdrop.classList.add("open");
     backdrop.setAttribute("aria-hidden", "false");
@@ -383,6 +429,7 @@ async function saveEntry() {
   try {
     if (!currentEntry) return;
 
+    const previousKey = currentEntry.key;
     const raw = editor ? editor.value.trim() : "";
     if (raw === "") {
       if (!confirm("Delete this entry?")) return;
@@ -398,13 +445,18 @@ async function saveEntry() {
       throw new Error(message || "Failed to save entry");
     }
 
-    const previousKey = currentEntry.key;
+    const data = await res.json().catch(() => ({}));
     await loadEntries();
-    currentEntry = findEntryByKey(previousKey);
+    currentEntry = findEntryByKey(data.key || previousKey);
     if (currentEntry && editor) {
       editor.value = currentEntry.raw || "";
     } else if (editor && raw === "") {
       editor.value = "";
+    }
+    if (data.deleted) {
+      showToast(`Deleted ${previousKey}`);
+    } else {
+      showToast(`Saved ${data.key || previousKey}`);
     }
   } catch (err) {
     console.error("Save failed:", err);
@@ -439,6 +491,7 @@ async function addEntry() {
     if (currentEntry && editor) {
       editor.value = currentEntry.raw || "";
     }
+    showToast(`Added ${data.key}`);
   } catch (err) {
     console.error("Add failed:", err);
     alert(err.message || "Failed to add entry");
@@ -455,6 +508,7 @@ async function handleUndo() {
       if (editor) {
         editor.value = currentEntry ? currentEntry.raw || "" : "";
       }
+      showToast("Undid last change");
       return;
     }
 
@@ -509,6 +563,35 @@ function buildExportItems() {
       entry.fields?.editor,
       entry.fields?.year,
       entry.type,
+    ]
+      .join(" ")
+      .toLowerCase(),
+  }));
+}
+
+function buildHistoryItems(items) {
+  return items.map((item) => ({
+    id: item.id,
+    key: item.id,
+    title: item.timestamp || item.id,
+    meta: pickerMeta([
+      item.action || "save",
+      `${item.entries_before} -> ${item.entries_after} entries`,
+      `+${item.lines_added}`,
+      `-${item.lines_removed}`,
+    ]),
+    selected: false,
+    badge: "Revision",
+    preview: item.diff_preview || "No diff preview available.",
+    searchText: [
+      item.id,
+      item.timestamp,
+      item.action,
+      item.entries_before,
+      item.entries_after,
+      item.lines_added,
+      item.lines_removed,
+      item.diff_preview,
     ]
       .join(" ")
       .toLowerCase(),
@@ -574,6 +657,41 @@ function openExportPicker() {
   });
 }
 
+async function openHistoryPicker() {
+  const res = await fetchHistory();
+  if (!res.ok) {
+    throw new Error(res.description || res.error || "Failed to load history");
+  }
+
+  const items = buildHistoryItems(res.items || []);
+  openPicker({
+    mode: "history",
+    title: "History",
+    subtitle: "Select one revision to inspect and restore.",
+    confirmText: "Restore",
+    emptyMessage: "No history available yet.",
+    items,
+    singleSelect: true,
+    showPreview: true,
+    previewLabel: "Diff preview",
+    previewEmptyText: "Select a revision to preview its diff.",
+    onConfirm: async (selectedItems) => {
+      const [selected] = selectedItems;
+      const restoreRes = await restoreHistory(selected.id);
+      if (!restoreRes.ok) {
+        throw new Error(restoreRes.description || restoreRes.error || "Restore failed");
+      }
+      const selectedKey = currentEntry ? currentEntry.key : null;
+      await loadEntries();
+      currentEntry = selectedKey ? findEntryByKey(selectedKey) : null;
+      if (editor) {
+        editor.value = currentEntry ? currentEntry.raw || "" : "";
+      }
+      showToast(`Restored ${selected.title}`);
+    },
+  });
+}
+
 async function openImportFilePicker() {
   const input = getEl("bibFileInput");
   if (!input) return;
@@ -628,6 +746,14 @@ function initUI() {
   getEl("copyBtn")?.addEventListener("click", copyCurrent);
   getEl("importToolbarBtn")?.addEventListener("click", openImportFilePicker);
   getEl("exportToolbarBtn")?.addEventListener("click", openExportPicker);
+  getEl("historyToolbarBtn")?.addEventListener("click", async () => {
+    try {
+      await openHistoryPicker();
+    } catch (err) {
+      console.error("History failed:", err);
+      alert(err.message || "Failed to load history");
+    }
+  });
 
   const viewToggleBtn = getEl("viewToggleBtn");
   if (viewToggleBtn) {

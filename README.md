@@ -13,6 +13,9 @@ Everything runs locally through a small Flask backend and a minimal JavaScript f
 * Browse a bibliography as a responsive grid of cards or list view
 * Search and sort entries (by year, author, or title)
 * Instant in-browser editing of BibTeX entries
+* Import `.bib` files from the toolbar or by drag and drop
+* Export selected entries to `export.bib`
+* Bounded edit history with restore support
 * Copy entries to the clipboard
 * Automatic detection of useful links:
   * DOI links
@@ -32,6 +35,15 @@ The editor on the right side of the interface always reflects the currently sele
 
 Clearing the editor and saving deletes the entry.
 
+The top toolbar also provides:
+
+* **IMPORT** – choose a `.bib` file and selectively merge entries into `main.bib`
+* **EXPORT** – select entries from the current library and download them as `export.bib`
+* **HISTORY** – browse recent revisions of `main.bib` and restore an earlier state
+
+Import and export both run the bibliography through `sort_dedupe_bibtex.py` before writing or downloading the result.
+Small toast notifications confirm actions such as save, add, import, export, undo, and restore.
+
 ---
 
 ## Data Layout
@@ -41,6 +53,8 @@ Bibry expects a very simple project structure:
 ```
 project/
 ├── main.bib
+├── backups/
+│   └── history/
 ├── pdf/
 │   ├── Turing1936.pdf
 │   └── Planck1901.pdf
@@ -48,6 +62,7 @@ project/
 ```
 
 * `main.bib` contains the bibliography
+* `backups/history/` stores up to 100 timestamped revisions with diff metadata and a restorable snapshot
 * the `pdf/` directory contains optional PDFs named after the BibTeX key
 
 If a PDF exists with the same key as a BibTeX entry, a **PDF button** appears on the card automatically.

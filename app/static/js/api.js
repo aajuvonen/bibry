@@ -62,3 +62,15 @@ export async function exportEntries(keys) {
   }
   return { ok: res.ok, status: res.status, blob, exportedCount, error };
 }
+
+export async function fetchHistory() {
+  const res = await fetch("/api/history");
+  return await parseResponse(res);
+}
+
+export async function restoreHistory(revisionId) {
+  const res = await fetch(`/api/history/${encodeURIComponent(revisionId)}/restore`, {
+    method: "POST",
+  });
+  return await parseResponse(res);
+}
