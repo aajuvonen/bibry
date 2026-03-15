@@ -1,7 +1,13 @@
 // static/js/main.js
 // Improved formatting, null-safety, and moved import handler into initUI()
 
-import { fetchEntries, undoLast } from "./api.js";
+import {
+  fetchEntries,
+  undoLast,
+  previewImportFile,
+  importEntries as importSelectedEntries,
+  exportEntries as requestExportEntries,
+} from "./api.js";
 import { buildIndex, applyFilters } from "./filters.js";
 import { createCard, getIconClass, extractLatexUrl } from "./renderer.js";
 
@@ -17,8 +23,20 @@ let searchInput = null;
 let sortDir = "desc";
 let viewMode = "grid"; // "grid" or "list"
 let renderToken = 0;
+let pickerState = null;
+let dragDepth = 0;
+let toastTimer = null;
 
 const RENDER_BATCH_SIZE = 80;
+
+function escapeHtml(value = "") {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 async function loadEntries() {
   allEntries = await fetchEntries();
@@ -28,6 +46,120 @@ async function loadEntries() {
 
 function findEntryByKey(key) {
   return allEntries.find((entry) => entry.key === key) || null;
+}
+
+function showToast(message) {
+  const toast = getEl("toastHint");
+  if (!toast) return;
+  toast.textContent = message;
+  toast.classList.add("show");
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toast.classList.remove("show");
+  }, 1800);
+}
+
+function filteredPickerItems() {
+  if (!pickerState) return [];
+  const query = pickerState.query.trim().toLowerCase();
+  if (!query) return pickerState.items;
+  return pickerState.items.filter((item) => item.searchText.includes(query));
+}
+
+function updatePickerInfo() {
+  if (!pickerState) return;
+  const info = getEl("pickerSelectionInfo");
+  if (!info) return;
+  const selectedCount = pickerState.items.filter((item) => item.selected).length;
+  info.textContent = `${selectedCount} selected`;
+}
+
+function renderPickerList() {
+  if (!pickerState) return;
+  const list = getEl("pickerList");
+  if (!list) return;
+
+  const items = filteredPickerItems();
+  list.innerHTML = "";
+
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "text-muted small py-3";
+    empty.textContent = pickerState.emptyMessage || "No entries found.";
+    list.appendChild(empty);
+    updatePickerInfo();
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  for (const item of items) {
+    const row = document.createElement("label");
+    row.className = "picker-item";
+    row.innerHTML = `
+      <input type="checkbox" class="form-check-input mt-1">
+      <div class="picker-item-main">
+        <div class="d-flex flex-wrap align-items-center gap-2">
+          <span class="picker-key">${escapeHtml(item.key || "(no key)")}</span>
+          ${item.badge ? `<span class="badge text-bg-light picker-badge">${escapeHtml(item.badge)}</span>` : ""}
+        </div>
+        <div class="fw-semibold">${escapeHtml(item.title || "(No title)")}</div>
+        <div class="picker-meta">${escapeHtml(item.meta || "")}</div>
+      </div>
+    `;
+
+    const checkbox = row.querySelector("input");
+    checkbox.checked = Boolean(item.selected);
+    checkbox.addEventListener("change", () => {
+      item.selected = checkbox.checked;
+      updatePickerInfo();
+    });
+
+    frag.appendChild(row);
+  }
+
+  list.appendChild(frag);
+  updatePickerInfo();
+}
+
+function closePicker() {
+  pickerState = null;
+  const backdrop = getEl("pickerBackdrop");
+  if (backdrop) {
+    backdrop.classList.remove("open");
+    backdrop.setAttribute("aria-hidden", "true");
+  }
+  const search = getEl("pickerSearch");
+  if (search) search.value = "";
+}
+
+function openPicker(config) {
+  pickerState = {
+    mode: config.mode,
+    title: config.title,
+    subtitle: config.subtitle || "",
+    confirmText: config.confirmText || "Confirm",
+    emptyMessage: config.emptyMessage || "No entries found.",
+    items: config.items,
+    query: "",
+    onConfirm: config.onConfirm,
+  };
+
+  const backdrop = getEl("pickerBackdrop");
+  const title = getEl("pickerTitle");
+  const subtitle = getEl("pickerSubtitle");
+  const search = getEl("pickerSearch");
+  const confirmBtn = getEl("pickerConfirmBtn");
+
+  if (title) title.textContent = pickerState.title;
+  if (subtitle) subtitle.textContent = pickerState.subtitle;
+  if (search) search.value = "";
+  if (confirmBtn) confirmBtn.textContent = pickerState.confirmText;
+  if (backdrop) {
+    backdrop.classList.add("open");
+    backdrop.setAttribute("aria-hidden", "false");
+  }
+
+  renderPickerList();
 }
 
 function getSortField() {
@@ -338,6 +470,117 @@ function copyCurrent() {
   navigator.clipboard.writeText(currentEntry.raw || "");
 }
 
+function pickerMeta(titleParts) {
+  return titleParts.filter(Boolean).join(" • ");
+}
+
+function buildImportItems(entries) {
+  return entries.map((entry, index) => ({
+    id: `import-${index}`,
+    key: entry.key || "",
+    title: entry.title || "",
+    meta: pickerMeta([entry.author, entry.year, entry.type]),
+    raw: entry.raw || "",
+    selected: Boolean(entry.selected),
+    badge: entry.exists ? "Already in library" : "New",
+    searchText: [entry.key, entry.title, entry.author, entry.year, entry.type]
+      .join(" ")
+      .toLowerCase(),
+  }));
+}
+
+function buildExportItems() {
+  return allEntries.map((entry) => ({
+    id: `export-${entry.key}`,
+    key: entry.key || "",
+    title: cleanLatex(entry.fields?.title || ""),
+    meta: pickerMeta([
+      cleanLatex(entry.fields?.author || entry.fields?.editor || ""),
+      cleanLatex(entry.fields?.year || ""),
+      entry.type || "",
+    ]),
+    raw: entry.raw || "",
+    selected: false,
+    badge: "",
+    searchText: [
+      entry.key,
+      entry.fields?.title,
+      entry.fields?.author,
+      entry.fields?.editor,
+      entry.fields?.year,
+      entry.type,
+    ]
+      .join(" ")
+      .toLowerCase(),
+  }));
+}
+
+async function runImport(file) {
+  const preview = await previewImportFile(file);
+  if (!preview.ok) {
+    throw new Error(preview.description || preview.error || "Failed to read import file");
+  }
+
+  const items = buildImportItems(preview.entries || []);
+  if (!items.length) {
+    throw new Error("No BibTeX entries found in file");
+  }
+
+  openPicker({
+    mode: "import",
+    title: "Import Entries",
+    subtitle: `${file.name} • new entries are preselected`,
+    confirmText: "Import",
+    emptyMessage: "No importable entries found.",
+    items,
+    onConfirm: async (selectedItems) => {
+      const res = await importSelectedEntries(selectedItems.map((item) => item.raw));
+      if (!res.ok) {
+        throw new Error(res.description || res.error || "Import failed");
+      }
+      await loadEntries();
+      showToast(`Imported ${res.imported_count} items`);
+    },
+  });
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function openExportPicker() {
+  openPicker({
+    mode: "export",
+    title: "Export Entries",
+    subtitle: "Search and select the entries to export.",
+    confirmText: "Export",
+    emptyMessage: "No entries available to export.",
+    items: buildExportItems(),
+    onConfirm: async (selectedItems) => {
+      const res = await requestExportEntries(selectedItems.map((item) => item.key));
+      if (!res.ok) {
+        throw new Error(res.error || "Export failed");
+      }
+      downloadBlob(res.blob, "export.bib");
+      showToast(`Exported ${res.exportedCount || selectedItems.length} items`);
+    },
+  });
+}
+
+async function openImportFilePicker() {
+  const input = getEl("bibFileInput");
+  if (!input) return;
+  input.value = "";
+  input.click();
+}
+
 function getEl(id) {
   return document.getElementById(id);
 }
@@ -383,6 +626,8 @@ function initUI() {
   getEl("addBtn")?.addEventListener("click", addEntry);
   getEl("undoBtn")?.addEventListener("click", handleUndo);
   getEl("copyBtn")?.addEventListener("click", copyCurrent);
+  getEl("importToolbarBtn")?.addEventListener("click", openImportFilePicker);
+  getEl("exportToolbarBtn")?.addEventListener("click", openExportPicker);
 
   const viewToggleBtn = getEl("viewToggleBtn");
   if (viewToggleBtn) {
@@ -396,43 +641,107 @@ function initUI() {
     });
   }
 
-  const importBtn = getEl("importBtn");
-  const doiInput = getEl("doiInput");
-
-  if (importBtn) {
-    importBtn.addEventListener("click", async () => {
-
-      const doi = doiInput ? doiInput.value.trim() : "";
-      if (!doi) return alert("Please enter a DOI");
-
+  const fileInput = getEl("bibFileInput");
+  if (fileInput) {
+    fileInput.addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
       try {
-
-        importBtn.disabled = true;
-        importBtn.textContent = "Importing...";
-
-        const res = await fetch(`/api/import?doi=${encodeURIComponent(doi)}`, { method: "POST" });
-        const data = await res.json();
-
-        if (data && data.success) {
-          await loadEntries();
-          filterAndRender();
-        } else {
-          alert("Import failed: " + (data && data.error ? data.error : "unknown error"));
-        }
-
+        await runImport(file);
       } catch (err) {
-
-        console.error("Import error", err);
-        alert("Import failed: " + (err && err.message ? err.message : "unknown error"));
-
-      } finally {
-
-        importBtn.disabled = false;
-        importBtn.textContent = "Import";
-
+        console.error("Import failed:", err);
+        alert(err.message || "Import failed");
       }
     });
   }
+
+  getEl("pickerCloseBtn")?.addEventListener("click", closePicker);
+  getEl("pickerBackdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) {
+      closePicker();
+    }
+  });
+  getEl("pickerSearch")?.addEventListener("input", (event) => {
+    if (!pickerState) return;
+    pickerState.query = event.target.value || "";
+    renderPickerList();
+  });
+  getEl("pickerSelectVisibleBtn")?.addEventListener("click", () => {
+    if (!pickerState) return;
+    for (const item of filteredPickerItems()) {
+      item.selected = true;
+    }
+    renderPickerList();
+  });
+  getEl("pickerClearBtn")?.addEventListener("click", () => {
+    if (!pickerState) return;
+    for (const item of pickerState.items) {
+      item.selected = false;
+    }
+    renderPickerList();
+  });
+  getEl("pickerConfirmBtn")?.addEventListener("click", async () => {
+    if (!pickerState) return;
+    const selectedItems = pickerState.items.filter((item) => item.selected);
+    if (!selectedItems.length) {
+      alert("Select at least one entry.");
+      return;
+    }
+
+    const confirmBtn = getEl("pickerConfirmBtn");
+    const originalText = confirmBtn ? confirmBtn.textContent : "Confirm";
+    if (confirmBtn) confirmBtn.disabled = true;
+
+    try {
+      await pickerState.onConfirm(selectedItems);
+      closePicker();
+    } catch (err) {
+      console.error(`${pickerState.mode} failed:`, err);
+      alert(err.message || `${pickerState.mode} failed`);
+    } finally {
+      if (confirmBtn) {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = originalText;
+      }
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && pickerState) {
+      closePicker();
+    }
+  });
+
+  const dropOverlay = getEl("dropOverlay");
+  document.addEventListener("dragenter", (event) => {
+    if (!event.dataTransfer?.types?.includes("Files")) return;
+    dragDepth += 1;
+    dropOverlay?.classList.add("open");
+  });
+  document.addEventListener("dragover", (event) => {
+    if (!event.dataTransfer?.types?.includes("Files")) return;
+    event.preventDefault();
+  });
+  document.addEventListener("dragleave", (event) => {
+    if (!event.dataTransfer?.types?.includes("Files")) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) {
+      dropOverlay?.classList.remove("open");
+    }
+  });
+  document.addEventListener("drop", async (event) => {
+    if (!event.dataTransfer?.files?.length) return;
+    event.preventDefault();
+    dragDepth = 0;
+    dropOverlay?.classList.remove("open");
+    const [file] = event.dataTransfer.files;
+    try {
+      await runImport(file);
+    } catch (err) {
+      console.error("Drop import failed:", err);
+      alert(err.message || "Import failed");
+    }
+  });
 }
 
 document.addEventListener("DOMContentLoaded", () => {

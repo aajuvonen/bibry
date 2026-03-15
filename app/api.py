@@ -1,13 +1,10 @@
 # app/api.py
-from flask import Blueprint, jsonify, request, abort, send_from_directory
-from pathlib import Path
-import requests
-import subprocess
-import os
+from flask import Blueprint, jsonify, request, abort, send_from_directory, Response
 import bibtexparser
 
 from . import bibstore
 from .latex import latex_to_text
+from .sort_dedupe_bibtex import BibEntry, process_bibtex_text, split_entries
 
 api_bp = Blueprint('api', __name__)
 
@@ -49,6 +46,22 @@ def _build_entry_cache():
 
 def warm_entries_cache():
     _build_entry_cache()
+
+
+def _entry_preview(raw):
+    entry = BibEntry(raw)
+    fields = entry.fields or {}
+    title = latex_to_text(fields.get("title", ""))
+    author = latex_to_text(fields.get("author", fields.get("editor", "")))
+    year = latex_to_text(fields.get("year", ""))
+    return {
+        "key": entry.key,
+        "type": entry.type,
+        "title": title,
+        "author": author,
+        "year": year,
+        "raw": raw.strip(),
+    }
 
 # Endpoint: current version for live refresh
 @api_bp.route("/version")
@@ -115,9 +128,8 @@ def api_undo():
         abort(400, "Nothing to undo")
     # Swap current and last states
     current = bibstore.BIBFILE.read_text(encoding="utf-8")
-    bibstore.BIBFILE.write_text(bibstore.LAST_BIB_STATE, encoding="utf-8")
+    bibstore.save_bib_text(bibstore.LAST_BIB_STATE)
     bibstore.LAST_BIB_STATE = current
-    bibstore.BIB_VERSION += 1
     return jsonify({"ok": True})
 
 # Serve PDF files
@@ -178,3 +190,72 @@ def api_add_entry():
     db.entries.append(new_entry)
     bibstore.save_bib(db)
     return jsonify({"ok": True, "key": new_key}), 201
+
+
+@api_bp.route("/import/preview", methods=["POST"])
+def api_import_preview():
+    upload = request.files.get("file")
+    if upload is None or upload.filename == "":
+        abort(400, "No file provided")
+
+    text = upload.read().decode("utf-8", errors="replace")
+    raw_entries = split_entries(text)
+    if not raw_entries:
+        abort(400, "No BibTeX entries found in file")
+
+    existing_keys = {entry.get("ID") for entry in bibstore.load_bib().entries}
+    previews = []
+    for raw in raw_entries:
+        raw = raw.strip()
+        if not raw.startswith("@"):
+            continue
+        preview = _entry_preview(raw)
+        preview["exists"] = preview["key"] in existing_keys
+        preview["selected"] = not preview["exists"]
+        previews.append(preview)
+
+    return jsonify({"entries": previews})
+
+
+@api_bp.route("/import", methods=["POST"])
+def api_import_entries():
+    selected_entries = request.json.get("entries", [])
+    if not isinstance(selected_entries, list) or not selected_entries:
+        abort(400, "No entries selected for import")
+
+    current_text = ""
+    if bibstore.BIBFILE.exists():
+        current_text = bibstore.BIBFILE.read_text(encoding="utf-8").strip()
+
+    parts = [current_text] if current_text else []
+    parts.extend(raw.strip() for raw in selected_entries if isinstance(raw, str) and raw.strip())
+    merged_text = "\n\n".join(parts)
+
+    normalized_text, stats = process_bibtex_text(merged_text)
+    before_count = len(bibstore.load_bib().entries)
+    bibstore.save_bib_text(normalized_text)
+
+    return jsonify({
+        "ok": True,
+        "selected_count": len(selected_entries),
+        "imported_count": max(0, stats["after_dedupe"] - before_count),
+        "total_entries": stats["after_dedupe"],
+    })
+
+
+@api_bp.route("/export", methods=["POST"])
+def api_export_entries():
+    keys = request.json.get("keys", [])
+    if not isinstance(keys, list) or not keys:
+        abort(400, "No entries selected for export")
+
+    key_set = set(keys)
+    selected_raw = [entry["raw"].strip() for entry in _build_entry_cache() if entry["key"] in key_set]
+    if not selected_raw:
+        abort(400, "No matching entries found")
+
+    normalized_text, stats = process_bibtex_text("\n\n".join(selected_raw))
+    response = Response(normalized_text, mimetype="application/x-bibtex")
+    response.headers["Content-Disposition"] = 'attachment; filename="export.bib"'
+    response.headers["X-Bibry-Exported-Count"] = str(stats["after_dedupe"])
+    return response

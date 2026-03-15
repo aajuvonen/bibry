@@ -328,35 +328,24 @@ def pick_better(a: BibEntry, b: BibEntry) -> BibEntry:
         return a if len(a.raw) > len(b.raw) else b
     return a if a.key < b.key else b
 
-def main():
-    p = argparse.ArgumentParser(description="Sort & dedupe a BibTeX file by date (ascending).")
-    p.add_argument('--input', '-i', required=True, help='Path to input .bib file')
-    p.add_argument('--output', '-o', required=False, help='Path to output .bib file (default: <input>.sorted.bib)')
-    p.add_argument('--keep-keys', action='store_true', help='Keep original field order (best-effort)')
-    p.add_argument('--dry-run', action='store_true', help='Only print stats, do not write output')
-    p.add_argument('--prefer', default='doi,arxiv,titleyear', help='Dedupe key priority, e.g. "titleyear,doi"')
-    args = p.parse_args()
 
-    in_path = args.input
-    out_path = args.output or (os.path.splitext(in_path)[0] + '.sorted.bib')
-    prefer_list = [s.strip().lower() for s in args.prefer.split(',') if s.strip()]
-
-    if not os.path.exists(in_path):
-        print(f'ERROR: Input file not found: {in_path}', file=sys.stderr)
-        sys.exit(1)
-
-    with open(in_path, 'r', encoding='utf-8') as f:
-        text = f.read()
+def process_bibtex_text(text: str, keep_field_order: bool = False, prefer: Optional[List[str]] = None) -> Tuple[str, Dict[str, int]]:
+    prefer_list = prefer or ['doi', 'arxiv', 'titleyear']
 
     raw_entries = split_entries(text)
     entries = [BibEntry(raw) for raw in raw_entries if raw.strip().startswith('@')]
 
     total = len(entries)
     if total == 0:
-        print('No entries found.')
-        sys.exit(0)
+        return "", {
+            'total': 0,
+            'after_dedupe': 0,
+            'duplicates_removed': 0,
+            'dup_hits': 0,
+            'dated': 0,
+            'undated': 0,
+        }
 
-    # Deduplication
     seen: Dict[str, BibEntry] = {}
     kept: Dict[int, BibEntry] = {}
     dup_count = 0
@@ -392,7 +381,6 @@ def main():
 
     deduped_entries = list(kept.values())
 
-    # Sort ascending by (year, month, day); then by normalized title to stabilize
     def sort_key(e: BibEntry):
         y, m, d = e.date_tuple()
         title = _normalize_title(_strip_outer_braces_or_quotes(e.fields.get('title', ''))) if e.fields.get('title') else ''
@@ -400,25 +388,65 @@ def main():
 
     deduped_entries.sort(key=sort_key)
 
-    # Sanitize URLs/DOIs according to requested policy
     for e in deduped_entries:
         e.sanitize()
 
+    parts = []
+    for e in deduped_entries:
+        parts.append(e.to_string(keep_field_order=keep_field_order))
+
+    dated = sum(1 for e in deduped_entries if e.date_tuple()[0] != 9999)
+    return '\n\n'.join(parts), {
+        'total': total,
+        'after_dedupe': len(deduped_entries),
+        'duplicates_removed': total - len(deduped_entries),
+        'dup_hits': dup_count,
+        'dated': dated,
+        'undated': len(deduped_entries) - dated,
+    }
+
+def main():
+    p = argparse.ArgumentParser(description="Sort & dedupe a BibTeX file by date (ascending).")
+    p.add_argument('--input', '-i', required=True, help='Path to input .bib file')
+    p.add_argument('--output', '-o', required=False, help='Path to output .bib file (default: <input>.sorted.bib)')
+    p.add_argument('--keep-keys', action='store_true', help='Keep original field order (best-effort)')
+    p.add_argument('--dry-run', action='store_true', help='Only print stats, do not write output')
+    p.add_argument('--prefer', default='doi,arxiv,titleyear', help='Dedupe key priority, e.g. "titleyear,doi"')
+    args = p.parse_args()
+
+    in_path = args.input
+    out_path = args.output or (os.path.splitext(in_path)[0] + '.sorted.bib')
+    prefer_list = [s.strip().lower() for s in args.prefer.split(',') if s.strip()]
+
+    if not os.path.exists(in_path):
+        print(f'ERROR: Input file not found: {in_path}', file=sys.stderr)
+        sys.exit(1)
+
+    with open(in_path, 'r', encoding='utf-8') as f:
+        text = f.read()
+
+    output_text, stats = process_bibtex_text(
+        text,
+        keep_field_order=args.keep_keys,
+        prefer=prefer_list,
+    )
+
+    total = stats['total']
+    if total == 0:
+        print('No entries found.')
+        sys.exit(0)
+
     if args.dry_run:
-        dated = sum(1 for e in deduped_entries if e.date_tuple()[0] != 9999)
         print(f'Entries total: {total}')
-        print(f'After dedupe: {len(deduped_entries)} (removed {total - len(deduped_entries)} duplicates; detected {dup_count} dup hits)')
-        print(f'With date: {dated}; Without date: {len(deduped_entries) - dated}')
+        print(f"After dedupe: {stats['after_dedupe']} (removed {stats['duplicates_removed']} duplicates; detected {stats['dup_hits']} dup hits)")
+        print(f"With date: {stats['dated']}; Without date: {stats['undated']}")
         print('Dry run complete; no file written.')
         return
 
     with open(out_path, 'w', encoding='utf-8') as f:
-        for i, e in enumerate(deduped_entries):
-            if i:
-                f.write('\n\n')
-            f.write(e.to_string(keep_field_order=args.keep_keys))
+        f.write(output_text)
 
-    print(f'Wrote {len(deduped_entries)} entries to: {out_path} (from {total}; removed {total - len(deduped_entries)} duplicates)')
+    print(f"Wrote {stats['after_dedupe']} entries to: {out_path} (from {total}; removed {stats['duplicates_removed']} duplicates)")
 
 if __name__ == '__main__':
     main()

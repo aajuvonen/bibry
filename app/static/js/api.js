@@ -1,6 +1,19 @@
 // static/js/api.js
 // Handles AJAX calls to the Flask API
 
+async function parseResponse(res) {
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: text };
+    }
+  }
+  return { ok: res.ok, status: res.status, ...data };
+}
+
 export async function fetchEntries() {
   const res = await fetch("/api/entries");
   return await res.json();
@@ -13,14 +26,39 @@ export async function fetchRawEntry(key) {
 
 export async function undoLast() {
   const res = await fetch("/api/undo", { method: "POST" });
-  const text = await res.text();
-  let data = {};
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { error: text };
-    }
+  return await parseResponse(res);
+}
+
+export async function previewImportFile(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch("/api/import/preview", {
+    method: "POST",
+    body: formData,
+  });
+  return await parseResponse(res);
+}
+
+export async function importEntries(entries) {
+  const res = await fetch("/api/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ entries }),
+  });
+  return await parseResponse(res);
+}
+
+export async function exportEntries(keys) {
+  const res = await fetch("/api/export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keys }),
+  });
+  const blob = await res.blob();
+  const exportedCount = Number(res.headers.get("X-Bibry-Exported-Count") || "0");
+  let error = "";
+  if (!res.ok) {
+    error = await blob.text();
   }
-  return { ok: res.ok, status: res.status, ...data };
+  return { ok: res.ok, status: res.status, blob, exportedCount, error };
 }

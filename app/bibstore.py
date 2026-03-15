@@ -56,3 +56,20 @@ def save_bib(db):
     _BIB_SIGNATURE = get_bib_signature()
     _DB_CACHE = db
     BIB_VERSION += 1
+
+
+def save_bib_text(text):
+    """Write raw BibTeX text back to file, with undo tracking."""
+    global LAST_BIB_STATE, BIB_VERSION, _BIB_SIGNATURE, _DB_CACHE
+    if not BACKUP.parent.exists():
+        BACKUP.parent.mkdir(parents=True)
+    if BIBFILE.exists():
+        LAST_BIB_STATE = BIBFILE.read_text(encoding="utf-8")
+        BACKUP.write_text(LAST_BIB_STATE, encoding="utf-8")
+    else:
+        LAST_BIB_STATE = None
+
+    BIBFILE.write_text(text, encoding="utf-8")
+    _BIB_SIGNATURE = None
+    _DB_CACHE = None
+    BIB_VERSION += 1
