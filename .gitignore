@@ -242,4 +242,4 @@ GitHub.sublime-settings
 # End of https://www.toptal.com/developers/gitignore/api/macos,sublimetext,python
 
 pdf/
-backups/
+bib/history/

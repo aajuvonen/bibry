@@ -1,13 +1,12 @@
 # app/bibstore.py
 import bibtexparser
-import difflib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .latex import latex_to_text
 from .sort_dedupe_bibtex import BibEntry
-from .sort_dedupe_bibtex import split_entries
+from .sort_dedupe_bibtex import process_bibtex_text, split_entries
 
 # Path to the BibTeX file (flat-file store)
 ROOT = Path(__file__).parent.parent
@@ -16,6 +15,7 @@ ACTIVE_BIB = BIB_DIR / ".active_bib"
 DEFAULT_BIB = "main.bib"
 HISTORY_ROOT = BIB_DIR / "history"
 HISTORY_LIMIT = 100
+HISTORY_CHECKPOINT_INTERVAL = 20
 
 # Globals for tracking last state and version (for live-refresh)
 BIB_VERSION = 0
@@ -79,6 +79,18 @@ def get_current_history_dir():
     return history_dir
 
 
+def get_current_history_revisions_dir():
+    revisions_dir = get_current_history_dir() / "revisions"
+    revisions_dir.mkdir(parents=True, exist_ok=True)
+    return revisions_dir
+
+
+def get_current_history_checkpoints_dir():
+    checkpoints_dir = get_current_history_dir() / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    return checkpoints_dir
+
+
 def get_last_bib_state():
     return _LAST_BIB_STATE.get(get_current_bib_filename())
 
@@ -117,19 +129,6 @@ def get_bib_signature():
 
 def _entry_count(text):
     return len([raw for raw in split_entries(text or "") if raw.strip().startswith("@")])
-
-
-def _diff_stats(diff_text):
-    added = 0
-    removed = 0
-    for line in diff_text.splitlines():
-        if line.startswith(("+++", "---", "@@")):
-            continue
-        if line.startswith("+"):
-            added += 1
-        elif line.startswith("-"):
-            removed += 1
-    return added, removed
 
 
 def _entry_map(text):
@@ -193,6 +192,8 @@ def _entry_change_summary(previous_entry, new_entry):
         "year_before": _entry_text(previous_entry, "year"),
         "year_after": _entry_text(new_entry, "year"),
         "changed_fields": changed_fields[:8],
+        "before_raw": previous_entry.raw.strip() if previous_entry else "",
+        "after_raw": new_entry.raw.strip() if new_entry else "",
     }
 
 
@@ -212,51 +213,107 @@ def _entry_changes(previous_text, new_text):
     return changes
 
 
+def _apply_changes_to_text(text, changes):
+    entries = _entry_map(text)
+    for change in changes:
+        key = change.get("key")
+        change_type = change.get("change_type")
+        if not key:
+            continue
+        if change_type == "removed":
+            entries.pop(key, None)
+            continue
+
+        raw = (change.get("after_raw") or "").strip()
+        if not raw.startswith("@"):
+            continue
+        entries[key] = BibEntry(raw)
+
+    raw_entries = [entry.raw.strip() for _, entry in sorted(entries.items(), key=lambda item: item[0].lower())]
+    combined = "\n\n".join(raw_entries)
+    normalized_text, _ = process_bibtex_text(combined) if combined else ("", {})
+    return normalized_text
+
+
+def _history_revision_paths():
+    revisions_dir = get_current_history_revisions_dir()
+    return sorted(revisions_dir.glob("*.json"))
+
+
+def _history_revision_count():
+    return len(_history_revision_paths())
+
+
+def _checkpoint_path_for_revision(revision_id):
+    return get_current_history_checkpoints_dir() / f"{revision_id}.bib"
+
+
+def _write_checkpoint(revision_id, text):
+    _checkpoint_path_for_revision(revision_id).write_text(text, encoding="utf-8")
+
+
+def _ensure_history_checkpoints():
+    revision_paths = _history_revision_paths()
+    checkpoint_ids = {path.stem for path in get_current_history_checkpoints_dir().glob("*.bib")}
+    for index, path in enumerate(revision_paths):
+        revision_id = path.stem
+        should_checkpoint = index == 0 or (index + 1) % HISTORY_CHECKPOINT_INTERVAL == 0
+        checkpoint_path = _checkpoint_path_for_revision(revision_id)
+        if should_checkpoint:
+            if checkpoint_path.exists():
+                continue
+            text = reconstruct_bib_text_at_revision(revision_id)
+            checkpoint_path.write_text(text, encoding="utf-8")
+        elif revision_id in checkpoint_ids:
+            checkpoint_path.unlink(missing_ok=True)
+
+
+def _prune_history():
+    revision_paths = _history_revision_paths()
+    for path in revision_paths[:-HISTORY_LIMIT]:
+        path.unlink(missing_ok=True)
+        _checkpoint_path_for_revision(path.stem).unlink(missing_ok=True)
+    _ensure_history_checkpoints()
+
+
 def _record_history(previous_text, new_text, action):
     if previous_text == new_text:
         return
 
-    history_dir = get_current_history_dir()
-
     timestamp = datetime.now(timezone.utc)
     revision_id = timestamp.strftime("%Y%m%dT%H%M%S%fZ")
-    diff_text = "".join(
-        difflib.unified_diff(
-            (previous_text or "").splitlines(keepends=True),
-            (new_text or "").splitlines(keepends=True),
-            fromfile="main.bib:before",
-            tofile="main.bib:after",
-            n=3,
-        )
-    )
-    added, removed = _diff_stats(diff_text)
+    changes = _entry_changes(previous_text, new_text)
+    before_count = _entry_count(previous_text)
+    after_count = _entry_count(new_text)
+    added = sum(1 for change in changes if change["change_type"] == "added")
+    removed = sum(1 for change in changes if change["change_type"] == "removed")
+    edited = sum(1 for change in changes if change["change_type"] == "edited")
     payload = {
         "id": revision_id,
         "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
         "action": action,
-        "entries_before": _entry_count(previous_text),
-        "entries_after": _entry_count(new_text),
-        "lines_added": added,
-        "lines_removed": removed,
-        "diff": diff_text,
-        "changes": _entry_changes(previous_text, new_text),
-        "snapshot": new_text,
+        "revision_index": _history_revision_count() + 1,
+        "entries_before": before_count,
+        "entries_after": after_count,
+        "added_count": added,
+        "removed_count": removed,
+        "edited_count": edited,
+        "changes": changes,
     }
-    history_path = history_dir / f"{revision_id}__{action}.json"
+    history_path = get_current_history_revisions_dir() / f"{revision_id}.json"
     history_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-
-    history_files = sorted(history_dir.glob("*.json"), reverse=True)
-    for old_path in history_files[HISTORY_LIMIT:]:
-        old_path.unlink(missing_ok=True)
+    if payload["revision_index"] == 1 or payload["revision_index"] % HISTORY_CHECKPOINT_INTERVAL == 0:
+        _write_checkpoint(revision_id, new_text)
+    _prune_history()
 
 
 def list_history():
-    history_dir = get_current_history_dir()
-    if not history_dir.exists():
+    revisions_dir = get_current_history_revisions_dir()
+    if not revisions_dir.exists():
         return []
 
     items = []
-    for path in sorted(history_dir.glob("*.json"), reverse=True):
+    for path in sorted(revisions_dir.glob("*.json"), reverse=True):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -267,25 +324,56 @@ def list_history():
             "action": data.get("action", "save"),
             "entries_before": data.get("entries_before", 0),
             "entries_after": data.get("entries_after", 0),
-            "lines_added": data.get("lines_added", 0),
-            "lines_removed": data.get("lines_removed", 0),
+            "added_count": data.get("added_count", 0),
+            "removed_count": data.get("removed_count", 0),
+            "edited_count": data.get("edited_count", 0),
             "changes": data.get("changes", []),
-            "diff_preview": "\n".join((data.get("diff") or "").splitlines()[:40]),
         })
     return items
 
 
 def get_history_revision(revision_id):
-    history_dir = get_current_history_dir()
-    if not history_dir.exists():
+    revisions_dir = get_current_history_revisions_dir()
+    if not revisions_dir.exists():
         return None
 
-    for path in history_dir.glob(f"{revision_id}__*.json"):
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-    return None
+    path = revisions_dir / f"{revision_id}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def reconstruct_bib_text_at_revision(revision_id):
+    revision_paths = _history_revision_paths()
+    target_index = None
+    for index, path in enumerate(revision_paths):
+        if path.stem == revision_id:
+            target_index = index
+            break
+    if target_index is None:
+        raise FileNotFoundError(revision_id)
+
+    checkpoint_index = None
+    checkpoint_text = ""
+    for index in range(target_index, -1, -1):
+        checkpoint_path = _checkpoint_path_for_revision(revision_paths[index].stem)
+        if checkpoint_path.exists():
+            checkpoint_index = index
+            checkpoint_text = checkpoint_path.read_text(encoding="utf-8")
+            break
+
+    if checkpoint_index is None:
+        checkpoint_index = -1
+        checkpoint_text = ""
+
+    current_text = checkpoint_text
+    for index in range(checkpoint_index + 1, target_index + 1):
+        data = json.loads(revision_paths[index].read_text(encoding="utf-8"))
+        current_text = _apply_changes_to_text(current_text, data.get("changes", []))
+    return current_text
 
 
 def load_bib():

@@ -42,6 +42,45 @@ function escapeHtml(value = "") {
     .replace(/'/g, "&#39;");
 }
 
+function formatAbsoluteTimestamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function formatRelativeTimestamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const diffMs = date.getTime() - Date.now();
+  const absSeconds = Math.abs(diffMs) / 1000;
+  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+
+  if (absSeconds < 45) return "just now";
+  if (absSeconds < 90) return rtf.format(Math.round(diffMs / 60000), "minute");
+  if (absSeconds < 2700) return rtf.format(Math.round(diffMs / 3600000), "hour");
+  if (absSeconds < 64800) return rtf.format(Math.round(diffMs / 86400000), "day");
+  if (absSeconds < 1944000) return rtf.format(Math.round(diffMs / 2592000000), "month");
+  return rtf.format(Math.round(diffMs / 31536000000), "year");
+}
+
+function formatTimestampLabel(value) {
+  const absolute = formatAbsoluteTimestamp(value);
+  const relative = formatRelativeTimestamp(value);
+  if (absolute && relative) {
+    return `${absolute} (${relative})`;
+  }
+  return absolute || relative || value || "";
+}
+
 async function loadEntries() {
   allEntries = await fetchEntries();
   buildIndex(allEntries);
@@ -701,12 +740,13 @@ function buildHistoryItems(items) {
   return items.map((item) => ({
     id: item.id,
     key: item.id,
-    title: item.timestamp || item.id,
+    title: formatTimestampLabel(item.timestamp) || item.id,
     meta: pickerMeta([
       item.action || "save",
       `${item.entries_before} -> ${item.entries_after} entries`,
-      `+${item.lines_added}`,
-      `-${item.lines_removed}`,
+      `${item.added_count || 0} added`,
+      `${item.edited_count || 0} edited`,
+      `${item.removed_count || 0} removed`,
     ]),
     selected: false,
     badge: "Revision",
@@ -717,8 +757,9 @@ function buildHistoryItems(items) {
       item.action,
       item.entries_before,
       item.entries_after,
-      item.lines_added,
-      item.lines_removed,
+      item.added_count,
+      item.edited_count,
+      item.removed_count,
       ...(item.changes || []).flatMap((change) => [
         change.key,
         change.title_before,
@@ -742,8 +783,8 @@ function buildBibFileItems(items) {
     title: item.filename,
     meta: pickerMeta([
       `${item.entry_count} entries`,
-      `created ${item.created_at}`,
-      `updated ${item.modified_at}`,
+      `created ${formatTimestampLabel(item.created_at)}`,
+      `updated ${formatTimestampLabel(item.modified_at)}`,
     ]),
     selected: Boolean(item.selected),
     badge: item.selected ? "Current" : "",

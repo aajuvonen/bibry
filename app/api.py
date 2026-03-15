@@ -293,7 +293,12 @@ def api_history_restore(revision_id):
     if revision is None:
         abort(404, "History entry not found")
 
-    bibstore.save_bib_text(revision.get("snapshot", ""), action="history-restore")
+    try:
+        restored_text = bibstore.reconstruct_bib_text_at_revision(revision_id)
+    except FileNotFoundError:
+        abort(404, "History entry not found")
+
+    bibstore.save_bib_text(restored_text, action="history-restore")
     return jsonify({
         "ok": True,
         "revision_id": revision_id,
