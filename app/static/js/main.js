@@ -30,8 +30,12 @@ let renderToken = 0;
 let pickerState = null;
 let dragDepth = 0;
 let toastTimer = null;
+let lastSelectedCardKey = null;
+let resizeTimer = null;
 
 const RENDER_BATCH_SIZE = 80;
+const GRID_COLUMN_MIN_WIDTH = 260;
+const GRID_COLUMN_GAP = 12;
 
 function escapeHtml(value = "") {
   return String(value)
@@ -447,16 +451,60 @@ function filterAndRender() {
   }
 }
 
+function renderEmptyState(container) {
+  if (!container) return;
+  container.classList.add("view-empty");
+  const hasQuery = Boolean((searchInput ? searchInput.value : "").trim());
+  const message = allEntries.length === 0
+    ? "This bibliography is empty."
+    : hasQuery
+      ? "No entries match the current search."
+      : "No entries to display.";
+  container.innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
+}
+
+function clearEmptyState(container) {
+  if (!container) return;
+  container.classList.remove("view-empty");
+}
+
+function getGridColumnCount() {
+  if (!grid) return 1;
+  const width = grid.clientWidth || 0;
+  if (!width) return 1;
+  return Math.max(1, Math.floor((width + GRID_COLUMN_GAP) / (GRID_COLUMN_MIN_WIDTH + GRID_COLUMN_GAP)));
+}
+
+function buildGridColumns() {
+  if (!grid) return [];
+  const count = getGridColumnCount();
+  const columns = [];
+  grid.innerHTML = "";
+  for (let index = 0; index < count; index += 1) {
+    const column = document.createElement("div");
+    column.className = "grid-column";
+    grid.appendChild(column);
+    columns.push(column);
+  }
+  return columns;
+}
+
 function renderGrid() {
   if (!grid) return;
 
   const list = document.getElementById("list");
   if (list) list.style.display = "none";
   grid.style.display = "";
+  clearEmptyState(grid);
 
-  grid.innerHTML = "";
+  lastSelectedCardKey = null;
+  if (!filteredEntries.length) {
+    renderEmptyState(grid);
+    return;
+  }
   const token = ++renderToken;
-  renderInBatches(filteredEntries, grid, token, (e) => {
+  const columns = buildGridColumns();
+  renderGridInBatches(filteredEntries, columns, token, (e) => {
     const card = createCard(e);
     card.addEventListener("click", () => selectEntry(e));
     return card;
@@ -472,8 +520,13 @@ function renderList() {
 
   if (grid) grid.style.display = "none";
   list.style.display = "block";
+  clearEmptyState(list);
 
   list.innerHTML = "";
+  if (!filteredEntries.length) {
+    renderEmptyState(list);
+    return;
+  }
   const token = ++renderToken;
   renderInBatches(filteredEntries, list, token, createListEntry);
 }
@@ -492,6 +545,29 @@ function renderInBatches(entries, container, token, buildNode) {
     }
 
     container.appendChild(frag);
+    updateSelectedCardState();
+
+    if (index < entries.length) {
+      requestAnimationFrame(appendBatch);
+    }
+  }
+
+  requestAnimationFrame(appendBatch);
+}
+
+function renderGridInBatches(entries, columns, token, buildNode) {
+  let index = 0;
+
+  function appendBatch() {
+    if (token !== renderToken || !columns.length) return;
+
+    const limit = Math.min(index + RENDER_BATCH_SIZE, entries.length);
+    for (; index < limit; index += 1) {
+      const column = columns[index % columns.length];
+      column.appendChild(buildNode(entries[index]));
+    }
+
+    updateSelectedCardState();
 
     if (index < entries.length) {
       requestAnimationFrame(appendBatch);
@@ -542,15 +618,15 @@ function createListEntry(entry) {
   const parts = [];
 
   if (authors || year) {
-    parts.push(`${authors}${year}`.trim());
+    parts.push(`<span class="bib-entry-meta">${authors}${year}`.trim() + `</span>`);
   }
 
   if (title) {
-    parts.push(`<b>${title}</b>`);
+    parts.push(`<span class="bib-entry-title">${title}</span>`);
   }
 
   if (source) {
-    parts.push(source);
+    parts.push(`<span class="bib-entry-muted">${source}</span>`);
   }
 
   let citation = parts.join(". ");
@@ -643,6 +719,26 @@ function cleanLatex(s = "") {
 function selectEntry(entry) {
   currentEntry = entry;
   if (editor) editor.value = entry.raw || "";
+  updateSelectedCardState();
+}
+
+function updateSelectedCardState() {
+  if (!grid) return;
+  const selectedKey = currentEntry ? currentEntry.key : null;
+  if (lastSelectedCardKey === selectedKey) {
+    const existing = selectedKey ? grid.querySelector(`.bib-card[data-entry-key="${escapeSelector(selectedKey)}"]`) : null;
+    if (selectedKey && existing) return;
+  }
+
+  if (lastSelectedCardKey) {
+    const previous = grid.querySelector(`.bib-card[data-entry-key="${escapeSelector(lastSelectedCardKey)}"]`);
+    previous?.classList.remove("is-selected");
+  }
+  if (selectedKey) {
+    const next = grid.querySelector(`.bib-card[data-entry-key="${escapeSelector(selectedKey)}"]`);
+    next?.classList.add("is-selected");
+  }
+  lastSelectedCardKey = selectedKey;
 }
 
 async function saveEntry() {
@@ -746,6 +842,27 @@ function copyCurrent() {
 
 function pickerMeta(titleParts) {
   return titleParts.filter(Boolean).join(" • ");
+}
+
+function escapeSelector(value = "") {
+  if (window.CSS && typeof window.CSS.escape === "function") {
+    return window.CSS.escape(value);
+  }
+  return String(value).replace(/["\\]/g, "\\$&");
+}
+
+function formatImportToast(importedCount = 0, updatedCount = 0) {
+  const parts = [];
+  if (importedCount) {
+    parts.push(`Imported ${importedCount} item${importedCount === 1 ? "" : "s"}`);
+  }
+  if (updatedCount) {
+    parts.push(`updated ${updatedCount} item${updatedCount === 1 ? "" : "s"}`);
+  }
+  if (!parts.length) {
+    return "No entries changed";
+  }
+  return parts.join(" and ");
 }
 
 function buildImportItems(entries) {
@@ -885,7 +1002,7 @@ async function runImport(file) {
         throw new Error(res.description || res.error || "Import failed");
       }
       await loadEntries();
-      showToast(`Imported ${res.imported_count} items`);
+      showToast(formatImportToast(res.imported_count || 0, res.updated_count || 0));
     },
   });
 }
@@ -1168,6 +1285,15 @@ function initUI() {
       console.error("Drop import failed:", err);
       alert(err.message || "Import failed");
     }
+  });
+
+  window.addEventListener("resize", () => {
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(() => {
+      if (viewMode === "grid" && grid && grid.offsetParent !== null) {
+        renderGrid();
+      }
+    }, 120);
   });
 }
 

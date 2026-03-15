@@ -308,6 +308,30 @@ def api_import_entries():
     if not isinstance(selected_entries, list) or not selected_entries:
         abort(400, "No entries selected for import")
 
+    existing_entries = {
+        entry.get("ID"): entry
+        for entry in bibstore.load_bib().entries
+        if entry.get("ID")
+    }
+    imported_count = 0
+    updated_count = 0
+    unchanged_count = 0
+    for raw in selected_entries:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        parsed = bibtexparser.loads(raw).entries
+        if len(parsed) != 1:
+            continue
+        incoming_entry = parsed[0]
+        key = incoming_entry.get("ID")
+        existing_entry = existing_entries.get(key)
+        if existing_entry is None:
+            imported_count += 1
+        elif _entry_signature(existing_entry) == _entry_signature(incoming_entry):
+            unchanged_count += 1
+        else:
+            updated_count += 1
+
     current_text = ""
     current_bib = bibstore.get_current_bib_path()
     if current_bib.exists():
@@ -324,7 +348,9 @@ def api_import_entries():
     return jsonify({
         "ok": True,
         "selected_count": len(selected_entries),
-        "imported_count": max(0, stats["after_dedupe"] - before_count),
+        "imported_count": imported_count,
+        "updated_count": updated_count,
+        "unchanged_count": unchanged_count,
         "total_entries": stats["after_dedupe"],
     })
 

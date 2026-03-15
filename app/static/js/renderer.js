@@ -45,26 +45,26 @@ export function getIconClass(type){
 export function createCard(entry) {
   const type = (entry.type || "").toLowerCase();
   const iconClass = getIconClass(type);
-
   const card = document.createElement("div");
-  card.className = "card";
+  card.className = "card bib-card";
+  card.dataset.entryKey = entry.key || "";
 
-  const f = entry.fields;
+  const f = entry.fields || {};
 
   const title = cleanLatex(f.title) || "(No Title)";
   const author = formatAuthors(cleanLatex(f.author || f.editor || ""));
   const venue = cleanLatex(f.journal || f.booktitle || "");
   const publisher = cleanLatex(f.publisher || "");
   const year = f.year || "";
+  const mutedParts = [publisher, year].filter(Boolean).join(" • ");
 
   card.innerHTML = `
-    <b><span class="text-muted small">
+    <span class="bib-entry-title"><span class="text-muted small">
       <i class="fa ${iconClass}" aria-hidden="true" title="${type}"></i>
-    </span>&nbsp;${title}</b><br>
-    ${author}<br>
-    ${venue}<br>
-    <span class="text-muted">${publisher}</span><br>
-    ${year}
+    </span>&nbsp;${title}</span>
+    ${author ? `<span class="bib-entry-meta bib-entry-author">${author}</span>` : ""}
+    ${venue ? `<span class="bib-entry-meta d-block">${venue}</span>` : ""}
+    ${mutedParts ? `<span class="bib-entry-muted d-block">${mutedParts}</span>` : ""}
   `;
 
   const actions = document.createElement("div");
@@ -76,69 +76,56 @@ export function createCard(entry) {
     a.target = "_blank";
     a.className = "btn btn-danger btn-sm";
     a.innerText = "PDF";
+    a.addEventListener("click", (event) => event.stopPropagation());
     actions.appendChild(a);
   }
 
-  const links = []
+  const links = [];
 
   if (f.url)
-      links.push({label:"URL", url:f.url})
+      links.push({label:"URL", url:f.url});
 
   const latexUrl =
       extractLatexUrl(f.howpublished) ||
-      extractLatexUrl(f.note)
+      extractLatexUrl(f.note);
 
   if (latexUrl)
-      links.push({label:"URL", url:latexUrl})
+      links.push({label:"URL", url:latexUrl});
 
-  const arxivUrl = extractArxiv(f)
+  const arxivUrl = extractArxiv(f);
 
   if (arxivUrl)
-      links.push({label:"arXiv", url:arxivUrl})
+      links.push({label:"arXiv", url:arxivUrl});
 
-  const seen = new Set()
+  const seen = new Set();
 
   links.forEach(link => {
 
       if (seen.has(link.url))
-          return
+          return;
 
-      seen.add(link.url)
+      seen.add(link.url);
 
-      const a = document.createElement("a")
+      const a = document.createElement("a");
 
-      a.href = link.url
-      a.target = "_blank"
-      a.className = "btn btn-primary btn-sm"
+      a.href = link.url;
+      a.target = "_blank";
+      a.className = "btn btn-primary btn-sm";
+      a.innerText = link.label;
+      a.addEventListener("click", (event) => event.stopPropagation());
+      actions.appendChild(a);
 
-      a.innerText = link.label
-
-      actions.appendChild(a)
-
-  })
+  });
 
   if (f.doi){
-    const a = document.createElement("a")
-    a.href = `https://doi.org/${f.doi}`
-    a.target = "_blank"
-    a.className = "btn btn-info btn-sm"
-    a.innerText = "DOI"
-    actions.appendChild(a)
+    const a = document.createElement("a");
+    a.href = `https://doi.org/${f.doi}`;
+    a.target = "_blank";
+    a.className = "btn btn-info btn-sm";
+    a.innerText = "DOI";
+    a.addEventListener("click", (event) => event.stopPropagation());
+    actions.appendChild(a);
   }
-
-  // Copy button
-  const copyBtn = document.createElement("button")
-  copyBtn.className = "btn btn-outline-dark btn-sm"
-  copyBtn.innerText = "COPY"
-  copyBtn.onclick = async ()=>{
-    copyBtn.onclick = async ()=>{
-      await navigator.clipboard.writeText(entry.raw)
-    }
-    const data = await res.json()
-    await navigator.clipboard.writeText(data.raw)
-  }
-
-  //actions.appendChild(copyBtn)
 
   card.appendChild(actions);
   return card;
