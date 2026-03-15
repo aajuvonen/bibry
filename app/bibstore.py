@@ -5,6 +5,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .latex import latex_to_text
+from .sort_dedupe_bibtex import BibEntry
 from .sort_dedupe_bibtex import split_entries
 
 # Path to the BibTeX file (flat-file store)
@@ -45,6 +47,86 @@ def _diff_stats(diff_text):
     return added, removed
 
 
+def _entry_map(text):
+    entries = {}
+    for raw in split_entries(text or ""):
+        raw = raw.strip()
+        if not raw.startswith("@"):
+            continue
+        entry = BibEntry(raw)
+        if entry.key:
+            entries[entry.key] = entry
+    return entries
+
+
+def _entry_text(entry, field):
+    if not entry:
+        return ""
+    if field == "key":
+        return entry.key
+    if field == "type":
+        return entry.type
+    return latex_to_text(entry.fields.get(field, ""))
+
+
+def _entry_signature(entry):
+    if entry is None:
+        return None
+    return (
+        (entry.type or "").lower(),
+        tuple(sorted((key, value.strip()) for key, value in entry.fields.items())),
+    )
+
+
+def _entry_change_summary(previous_entry, new_entry):
+    source = new_entry or previous_entry
+    changed_fields = []
+    if previous_entry and new_entry:
+        field_names = sorted(set(previous_entry.fields) | set(new_entry.fields))
+        for field in field_names:
+            before = latex_to_text(previous_entry.fields.get(field, ""))
+            after = latex_to_text(new_entry.fields.get(field, ""))
+            if before != after:
+                changed_fields.append({
+                    "field": field,
+                    "before": before,
+                    "after": after,
+                })
+
+    return {
+        "key": source.key if source else "",
+        "change_type": (
+            "added" if previous_entry is None else
+            "removed" if new_entry is None else
+            "edited"
+        ),
+        "entry_type": (source.type or "").lower() if source else "",
+        "title_before": _entry_text(previous_entry, "title"),
+        "title_after": _entry_text(new_entry, "title"),
+        "author_before": _entry_text(previous_entry, "author") or _entry_text(previous_entry, "editor"),
+        "author_after": _entry_text(new_entry, "author") or _entry_text(new_entry, "editor"),
+        "year_before": _entry_text(previous_entry, "year"),
+        "year_after": _entry_text(new_entry, "year"),
+        "changed_fields": changed_fields[:8],
+    }
+
+
+def _entry_changes(previous_text, new_text):
+    previous_entries = _entry_map(previous_text)
+    new_entries = _entry_map(new_text)
+    changes = []
+
+    for key in sorted(set(previous_entries) | set(new_entries)):
+        before = previous_entries.get(key)
+        after = new_entries.get(key)
+        if before and after:
+            if _entry_signature(before) == _entry_signature(after):
+                continue
+        changes.append(_entry_change_summary(before, after))
+
+    return changes
+
+
 def _record_history(previous_text, new_text, action):
     if previous_text == new_text:
         return
@@ -72,6 +154,7 @@ def _record_history(previous_text, new_text, action):
         "lines_added": added,
         "lines_removed": removed,
         "diff": diff_text,
+        "changes": _entry_changes(previous_text, new_text),
         "snapshot": new_text,
     }
     history_path = HISTORY_DIR / f"{revision_id}__{action}.json"
@@ -100,6 +183,7 @@ def list_history():
             "entries_after": data.get("entries_after", 0),
             "lines_added": data.get("lines_added", 0),
             "lines_removed": data.get("lines_removed", 0),
+            "changes": data.get("changes", []),
             "diff_preview": "\n".join((data.get("diff") or "").splitlines()[:40]),
         })
     return items

@@ -84,20 +84,133 @@ function updatePickerPreview() {
   const preview = getEl("pickerPreview");
   const previewLabel = getEl("pickerPreviewLabel");
   const previewText = getEl("pickerPreviewText");
+  const body = preview ? preview.parentElement : null;
   if (!preview || !previewLabel || !previewText) return;
 
   if (!pickerState || !pickerState.showPreview) {
     preview.classList.remove("open");
+    body?.classList.remove("preview-split");
     previewLabel.textContent = "";
-    previewText.textContent = "";
+    previewText.innerHTML = "";
     return;
   }
 
   const selectedItem = pickerState.items.find((item) => item.selected) || null;
-  const text = selectedItem ? (selectedItem.preview || pickerState.previewEmptyText || "") : "";
   preview.classList.add("open");
+  body?.classList.add("preview-split");
   previewLabel.textContent = pickerState.previewLabel || "";
-  previewText.textContent = text || pickerState.previewEmptyText || "";
+  if (!selectedItem) {
+    previewText.innerHTML = `<div class="text-muted small">${escapeHtml(pickerState.previewEmptyText || "")}</div>`;
+    return;
+  }
+
+  if (pickerState.previewRenderer) {
+    previewText.innerHTML = pickerState.previewRenderer(selectedItem);
+    return;
+  }
+
+  previewText.innerHTML = `<div class="small"><pre>${escapeHtml(selectedItem.preview || pickerState.previewEmptyText || "")}</pre></div>`;
+}
+
+function splitDiffWords(text = "") {
+  const tokens = String(text).match(/\S+|\s+/g) || [];
+  return tokens;
+}
+
+function diffFragments(before = "", after = "") {
+  const a = splitDiffWords(before);
+  const b = splitDiffWords(after);
+  const dp = Array.from({ length: a.length + 1 }, () => Array(b.length + 1).fill(0));
+
+  for (let i = a.length - 1; i >= 0; i -= 1) {
+    for (let j = b.length - 1; j >= 0; j -= 1) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  let i = 0;
+  let j = 0;
+  const removed = [];
+  const added = [];
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+    if (dp[i + 1][j] >= dp[i][j + 1]) {
+      removed.push(a[i]);
+      i += 1;
+    } else {
+      added.push(b[j]);
+      j += 1;
+    }
+  }
+  while (i < a.length) removed.push(a[i++]);
+  while (j < b.length) added.push(b[j++]);
+
+  return {
+    before: escapeHtml(removed.join("")),
+    after: escapeHtml(added.join("")),
+  };
+}
+
+function historyChangeIcon(changeType) {
+  if (changeType === "added") return { icon: "fa-plus-circle", color: "#198754", label: "Added" };
+  if (changeType === "removed") return { icon: "fa-minus-circle", color: "#dc3545", label: "Removed" };
+  return { icon: "fa-pencil", color: "#fd7e14", label: "Edited" };
+}
+
+function renderHistoryChanges(item) {
+  const changes = item.changes || [];
+  if (!changes.length) {
+    return `<div class="text-muted small">No entry-level change summary is available for this revision.</div>`;
+  }
+
+  return changes.map((change) => {
+    const icon = historyChangeIcon(change.change_type);
+    const title = change.title_after || change.title_before || "(No title)";
+    const meta = pickerMeta([
+      change.author_after || change.author_before,
+      change.year_after || change.year_before,
+      change.entry_type,
+    ]);
+
+    let fieldsHtml = "";
+    if (change.change_type === "edited" && Array.isArray(change.changed_fields) && change.changed_fields.length) {
+      const rows = change.changed_fields.slice(0, 4).map((field) => {
+        const fragments = diffFragments(field.before || "", field.after || "");
+        const beforeHtml = fragments.before || escapeHtml(field.before || "");
+        const afterHtml = fragments.after || escapeHtml(field.after || "");
+        return `
+          <div class="history-field">
+            <span class="text-muted">${escapeHtml(field.field)}:</span>
+            <span class="history-before">${beforeHtml || "&nbsp;"}</span>
+            <span class="history-arrow">→</span>
+            <span class="history-after">${afterHtml || "&nbsp;"}</span>
+          </div>
+        `;
+      }).join("");
+      fieldsHtml = `<div class="history-change-fields">${rows}</div>`;
+    }
+
+    return `
+      <div class="history-change">
+        <div class="history-change-icon" title="${escapeHtml(icon.label)}">
+          <i class="fa ${icon.icon}" style="color:${icon.color}" aria-hidden="true"></i>
+        </div>
+        <div class="picker-item-main">
+          <div class="d-flex flex-wrap align-items-center gap-2">
+            <span class="picker-key">${escapeHtml(change.key || "(no key)")}</span>
+            <span class="badge text-bg-light picker-badge">${escapeHtml(icon.label)}</span>
+          </div>
+          <div class="fw-semibold">${escapeHtml(title)}</div>
+          <div class="picker-meta">${escapeHtml(meta || "")}</div>
+          ${fieldsHtml}
+        </div>
+      </div>
+    `;
+  }).join("");
 }
 
 function renderPickerList() {
@@ -122,8 +235,9 @@ function renderPickerList() {
   for (const item of items) {
     const row = document.createElement("label");
     row.className = "picker-item";
+    const selectorType = pickerState?.singleSelect ? "radio" : "checkbox";
     row.innerHTML = `
-      <input type="checkbox" class="form-check-input mt-1">
+      <input type="${selectorType}" class="form-check-input mt-1" ${pickerState?.singleSelect ? 'name="pickerSelection"' : ""}>
       <div class="picker-item-main">
         <div class="d-flex flex-wrap align-items-center gap-2">
           <span class="picker-key">${escapeHtml(item.key || "(no key)")}</span>
@@ -180,6 +294,7 @@ function openPicker(config) {
     showPreview: Boolean(config.showPreview),
     previewLabel: config.previewLabel || "",
     previewEmptyText: config.previewEmptyText || "",
+    previewRenderer: config.previewRenderer || null,
   };
 
   const backdrop = getEl("pickerBackdrop");
@@ -582,7 +697,7 @@ function buildHistoryItems(items) {
     ]),
     selected: false,
     badge: "Revision",
-    preview: item.diff_preview || "No diff preview available.",
+    changes: item.changes || [],
     searchText: [
       item.id,
       item.timestamp,
@@ -591,7 +706,16 @@ function buildHistoryItems(items) {
       item.entries_after,
       item.lines_added,
       item.lines_removed,
-      item.diff_preview,
+      ...(item.changes || []).flatMap((change) => [
+        change.key,
+        change.title_before,
+        change.title_after,
+        change.author_before,
+        change.author_after,
+        change.year_before,
+        change.year_after,
+        ...(change.changed_fields || []).flatMap((field) => [field.field, field.before, field.after]),
+      ]),
     ]
       .join(" ")
       .toLowerCase(),
@@ -673,8 +797,9 @@ async function openHistoryPicker() {
     items,
     singleSelect: true,
     showPreview: true,
-    previewLabel: "Diff preview",
-    previewEmptyText: "Select a revision to preview its diff.",
+    previewLabel: "Changed entries",
+    previewEmptyText: "Select a revision to preview its changed entries.",
+    previewRenderer: renderHistoryChanges,
     onConfirm: async (selectedItems) => {
       const [selected] = selectedItems;
       const restoreRes = await restoreHistory(selected.id);
