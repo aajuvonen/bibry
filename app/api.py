@@ -63,6 +63,52 @@ def _entry_preview(raw):
         "raw": raw.strip(),
     }
 
+
+def _entry_signature(entry):
+    return (
+        (entry.get("ENTRYTYPE") or "").lower(),
+        tuple(sorted(
+            (key, value.strip())
+            for key, value in entry.items()
+            if key not in {"ID", "ENTRYTYPE"} and isinstance(value, str)
+        )),
+    )
+
+
+def _entry_conflict(existing_entry, incoming_entry):
+    changed_fields = []
+    field_names = sorted(
+        {
+            key for key in existing_entry.keys() | incoming_entry.keys()
+            if key not in {"ID", "ENTRYTYPE"}
+        }
+    )
+    for field in field_names:
+        before = latex_to_text(existing_entry.get(field, "")) if isinstance(existing_entry.get(field, ""), str) else existing_entry.get(field, "")
+        after = latex_to_text(incoming_entry.get(field, "")) if isinstance(incoming_entry.get(field, ""), str) else incoming_entry.get(field, "")
+        if before != after:
+            changed_fields.append({
+                "field": field,
+                "before": before or "",
+                "after": after or "",
+            })
+
+    return {
+        "changed_fields": changed_fields,
+        "existing": {
+            "title": latex_to_text(existing_entry.get("title", "")),
+            "author": latex_to_text(existing_entry.get("author", existing_entry.get("editor", ""))),
+            "year": latex_to_text(existing_entry.get("year", "")),
+            "type": existing_entry.get("ENTRYTYPE", ""),
+        },
+        "incoming": {
+            "title": latex_to_text(incoming_entry.get("title", "")),
+            "author": latex_to_text(incoming_entry.get("author", incoming_entry.get("editor", ""))),
+            "year": latex_to_text(incoming_entry.get("year", "")),
+            "type": incoming_entry.get("ENTRYTYPE", ""),
+        },
+    }
+
 # Endpoint: current version for live refresh
 @api_bp.route("/version")
 def api_version():
@@ -223,15 +269,34 @@ def api_import_preview():
     if not raw_entries:
         abort(400, "No BibTeX entries found in file")
 
-    existing_keys = {entry.get("ID") for entry in bibstore.load_bib().entries}
+    existing_entries = {
+        entry.get("ID"): entry
+        for entry in bibstore.load_bib().entries
+        if entry.get("ID")
+    }
     previews = []
     for raw in raw_entries:
         raw = raw.strip()
         if not raw.startswith("@"):
             continue
         preview = _entry_preview(raw)
-        preview["exists"] = preview["key"] in existing_keys
-        preview["selected"] = not preview["exists"]
+        incoming_entry = bibtexparser.loads(raw).entries[0]
+        existing_entry = existing_entries.get(preview["key"])
+        if existing_entry is None:
+            preview["status"] = "new"
+            preview["exists"] = False
+            preview["selected"] = True
+            preview["conflict"] = None
+        elif _entry_signature(existing_entry) == _entry_signature(incoming_entry):
+            preview["status"] = "same"
+            preview["exists"] = True
+            preview["selected"] = False
+            preview["conflict"] = None
+        else:
+            preview["status"] = "conflict"
+            preview["exists"] = True
+            preview["selected"] = False
+            preview["conflict"] = _entry_conflict(existing_entry, incoming_entry)
         previews.append(preview)
 
     return jsonify({"entries": previews})

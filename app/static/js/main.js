@@ -169,7 +169,7 @@ function splitDiffWords(text = "") {
   return tokens;
 }
 
-function diffFragments(before = "", after = "") {
+function diffMarkup(before = "", after = "") {
   const a = splitDiffWords(before);
   const b = splitDiffWords(after);
   const dp = Array.from({ length: a.length + 1 }, () => Array(b.length + 1).fill(0));
@@ -182,28 +182,37 @@ function diffFragments(before = "", after = "") {
 
   let i = 0;
   let j = 0;
-  const removed = [];
-  const added = [];
+  let beforeHtml = "";
+  let afterHtml = "";
   while (i < a.length && j < b.length) {
     if (a[i] === b[j]) {
+      const shared = escapeHtml(a[i]);
+      beforeHtml += shared;
+      afterHtml += shared;
       i += 1;
       j += 1;
       continue;
     }
     if (dp[i + 1][j] >= dp[i][j + 1]) {
-      removed.push(a[i]);
+      beforeHtml += `<span class="history-before">${escapeHtml(a[i]) || "&nbsp;"}</span>`;
       i += 1;
     } else {
-      added.push(b[j]);
+      afterHtml += `<span class="history-after">${escapeHtml(b[j]) || "&nbsp;"}</span>`;
       j += 1;
     }
   }
-  while (i < a.length) removed.push(a[i++]);
-  while (j < b.length) added.push(b[j++]);
+  while (i < a.length) {
+    beforeHtml += `<span class="history-before">${escapeHtml(a[i]) || "&nbsp;"}</span>`;
+    i += 1;
+  }
+  while (j < b.length) {
+    afterHtml += `<span class="history-after">${escapeHtml(b[j]) || "&nbsp;"}</span>`;
+    j += 1;
+  }
 
   return {
-    before: escapeHtml(removed.join("")),
-    after: escapeHtml(added.join("")),
+    before: beforeHtml || escapeHtml(before),
+    after: afterHtml || escapeHtml(after),
   };
 }
 
@@ -211,6 +220,52 @@ function historyChangeIcon(changeType) {
   if (changeType === "added") return { icon: "fa-plus-circle", color: "#198754", label: "Added" };
   if (changeType === "removed") return { icon: "fa-minus-circle", color: "#dc3545", label: "Removed" };
   return { icon: "fa-pencil", color: "#fd7e14", label: "Edited" };
+}
+
+function importStatusBadge(status) {
+  if (status === "new") return "New";
+  if (status === "same") return "Unchanged";
+  if (status === "conflict") return "Conflict";
+  return "";
+}
+
+function renderImportPreview(item) {
+  if (item.status === "new") {
+    return `<div class="text-muted small">This entry is new and will be added if selected.</div>`;
+  }
+
+  if (item.status === "same") {
+    return `<div class="text-muted small">This entry matches the current bibliography entry exactly.</div>`;
+  }
+
+  const conflict = item.conflict;
+  if (!conflict || !Array.isArray(conflict.changed_fields) || !conflict.changed_fields.length) {
+    return `<div class="text-muted small">This entry differs from the current bibliography entry.</div>`;
+  }
+
+  const summary = pickerMeta([
+    conflict.existing?.author || conflict.incoming?.author,
+    conflict.existing?.year || conflict.incoming?.year,
+    conflict.existing?.type || conflict.incoming?.type,
+  ]);
+
+  const fieldsHtml = conflict.changed_fields.slice(0, 6).map((field) => {
+    const fragments = diffMarkup(field.before || "", field.after || "");
+    return `
+      <div class="history-field">
+        <span class="text-muted">${escapeHtml(field.field)}:</span>
+        <span>${fragments.before || "&nbsp;"}</span>
+        <span class="history-arrow">→</span>
+        <span>${fragments.after || "&nbsp;"}</span>
+      </div>
+    `;
+  }).join("");
+
+  return `
+    <div class="fw-semibold">${escapeHtml(conflict.incoming?.title || item.title || "(No title)")}</div>
+    <div class="picker-meta mb-2">${escapeHtml(summary || "")}</div>
+    <div class="history-change-fields">${fieldsHtml}</div>
+  `;
 }
 
 function renderHistoryChanges(item) {
@@ -231,15 +286,13 @@ function renderHistoryChanges(item) {
     let fieldsHtml = "";
     if (change.change_type === "edited" && Array.isArray(change.changed_fields) && change.changed_fields.length) {
       const rows = change.changed_fields.slice(0, 4).map((field) => {
-        const fragments = diffFragments(field.before || "", field.after || "");
-        const beforeHtml = fragments.before || escapeHtml(field.before || "");
-        const afterHtml = fragments.after || escapeHtml(field.after || "");
+        const fragments = diffMarkup(field.before || "", field.after || "");
         return `
           <div class="history-field">
             <span class="text-muted">${escapeHtml(field.field)}:</span>
-            <span class="history-before">${beforeHtml || "&nbsp;"}</span>
+            <span>${fragments.before || "&nbsp;"}</span>
             <span class="history-arrow">→</span>
-            <span class="history-after">${afterHtml || "&nbsp;"}</span>
+            <span>${fragments.after || "&nbsp;"}</span>
           </div>
         `;
       }).join("");
@@ -703,8 +756,18 @@ function buildImportItems(entries) {
     meta: pickerMeta([entry.author, entry.year, entry.type]),
     raw: entry.raw || "",
     selected: Boolean(entry.selected),
-    badge: entry.exists ? "Already in library" : "New",
-    searchText: [entry.key, entry.title, entry.author, entry.year, entry.type]
+    badge: importStatusBadge(entry.status),
+    status: entry.status || (entry.exists ? "same" : "new"),
+    conflict: entry.conflict || null,
+    searchText: [
+      entry.key,
+      entry.title,
+      entry.author,
+      entry.year,
+      entry.type,
+      entry.status,
+      ...(entry.conflict?.changed_fields || []).flatMap((field) => [field.field, field.before, field.after]),
+    ]
       .join(" ")
       .toLowerCase(),
   }));
@@ -743,7 +806,7 @@ function buildHistoryItems(items) {
     title: formatTimestampLabel(item.timestamp) || item.id,
     meta: pickerMeta([
       item.action || "save",
-      `${item.entries_before} -> ${item.entries_after} entries`,
+      `${item.entries_before} → ${item.entries_after} entries`,
       `${item.added_count || 0} added`,
       `${item.edited_count || 0} edited`,
       `${item.removed_count || 0} removed`,
@@ -808,10 +871,14 @@ async function runImport(file) {
   openPicker({
     mode: "import",
     title: "Import Entries",
-    subtitle: `${file.name} • new entries are preselected`,
+    subtitle: `${file.name} • new entries are preselected, conflicts require explicit selection`,
     confirmText: "Import",
     emptyMessage: "No importable entries found.",
     items,
+    showPreview: true,
+    previewLabel: "Import comparison",
+    previewEmptyText: "Select an entry to preview differences.",
+    previewRenderer: renderImportPreview,
     onConfirm: async (selectedItems) => {
       const res = await importSelectedEntries(selectedItems.map((item) => item.raw));
       if (!res.ok) {
