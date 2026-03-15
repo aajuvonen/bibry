@@ -1,0 +1,10 @@
+services:
+  bibry:
+    build: .
+    container_name: bibry
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./bib:/app/bib
+      - ./pdf:/app/pdf
+    restart: unless-stopped

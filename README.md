@@ -1,168 +1,140 @@
 # Bibry
 
-Bibry is a lightweight web interface for browsing and editing a flat BibTeX/BibLaTeX bibliography.
-It is designed for personal research libraries where the data lives in a single `.bib` file and an optional directory of PDFs.
+Bibry is a lightweight web interface for browsing and editing a flat BibTeX/BibLaTeX bibliography. It is designed for personal research libraries where the data lives in normal `.bib` files plus an optional directory of PDFs.
 
-The project focuses on simplicity: no database, no accounts, no heavy frameworks.
-Everything runs locally through a small Flask backend and a minimal JavaScript frontend.
-
----
+The project stays deliberately simple: no database, no accounts, no heavy frontend framework. The default runtime is now Docker, so Bibry can run locally, on a home server, or behind a VPN without needing an interactive shell session.
 
 ## Features
 
-* Browse a bibliography as a responsive grid of cards or list view
-* Search and sort entries (by year, author, or title)
-* Instant in-browser editing of BibTeX entries
+* Browse a bibliography as cards or as a list
+* Search and sort entries by year, author, or title
+* Edit raw BibTeX directly in the browser
+* Add, save, delete, copy, and undo entries
 * Import `.bib` files from the toolbar or by drag and drop
+* Preview import conflicts with entry-level diffs
 * Export selected entries to `export.bib`
-* Bounded edit history with restore support
-* Copy entries to the clipboard
-* Automatic detection of useful links:
-  * DOI links
-  * URLs in BibTeX fields
-  * `\url{...}` blocks
-  * arXiv identifiers (`archiveprefix` + `eprint`) and the like
-* Automatic PDF linking when a file named `<bibkey>.pdf` exists
-* Mobile-friendly responsive layout
+* Keep bounded per-file history with restore support
+* Switch between multiple `.bib` files in `bib/`
+* Show DOI, URL, arXiv, and PDF links when available
+* Work reasonably well on mobile as well as desktop
 
-The editor on the right side of the interface always reflects the currently selected entry and allows:
-
-* **SAVE** – update the entry
-* **CANCEL** – revert edits
-* **ADD** – create a new entry
-* **COPY** – copy the raw BibTeX
-* **UNDO** – revert last change
-
-Clearing the editor and saving deletes the entry.
-
-The top toolbar also provides:
-
-* **IMPORT** – choose a `.bib` file and selectively merge entries into `main.bib`
-* **EXPORT** – select entries from the current library and download them as `export.bib`
-* **HISTORY** – browse recent revisions of `main.bib` and restore an earlier state
-
-Import and export both run the bibliography through `sort_dedupe_bibtex.py` before writing or downloading the result.
-Small toast notifications confirm actions such as save, add, import, export, undo, and restore.
-
----
+Import and export both pass the resulting bibliography through the sort/dedupe routine before writing or downloading it. Small toast notifications confirm actions such as save, add, import, export, undo, and restore.
 
 ## Data Layout
 
-Bibry expects a very simple project structure:
+Bibry stores bibliography data directly on disk:
 
-```
+```text
 project/
-├── main.bib
-├── backups/
+├── app/
+├── bib/
+│   ├── main.bib
+│   ├── another-library.bib
+│   ├── .active_bib
 │   └── history/
+│       ├── main.bib/
+│       └── another-library.bib/
 ├── pdf/
 │   ├── Turing1936.pdf
 │   └── Planck1901.pdf
-└── app/
+├── Dockerfile
+└── docker-compose.yml
 ```
 
-* `main.bib` contains the bibliography
-* `backups/history/` stores up to 100 timestamped revisions with diff metadata and a restorable snapshot
-* the `pdf/` directory contains optional PDFs named after the BibTeX key
+* `bib/` contains the available bibliography files
+* `bib/.active_bib` stores the currently selected bibliography filename
+* `bib/history/<filename>/` stores recent revision history for each `.bib` file
+* `pdf/` contains optional PDFs named after BibTeX keys
 
-If a PDF exists with the same key as a BibTeX entry, a **PDF button** appears on the card automatically.
+If `pdf/<key>.pdf` exists, Bibry shows a PDF link for that entry automatically.
 
----
+## Running with Docker
 
-## Running the Application
+Docker Compose is the default way to run Bibry.
 
-Run:
-```
-sh run.sh
-```
+Start the application:
 
-The script provides a simple way to set up the environment and start the Bibry server.
-
-When executed, it performs the following steps:
-
-1. **Create a Python virtual environment**
-
-   ```bash
-   python3 -m venv .venv
-   ```
-
-   This creates an isolated Python environment in the `.venv/` directory so that project dependencies do not interfere with system Python packages.
-
-2. **Activate the virtual environment**
-
-   ```bash
-   . .venv/bin/activate
-   ```
-
-   After activation, any Python commands (`python`, `pip`, etc.) run inside the virtual environment.
-
-3. **Install project dependencies**
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-   This installs all Python libraries required by Bibry, such as Flask, Gunicorn, and BibTeX parsing utilities.
-
-4. **Start the web server**
-
-   ```bash
-   gunicorn wsgi:app \
-     --workers 4 \
-     --threads 4 \
-     --timeout 120 \
-     --bind 0.0.0.0:5000
-   ```
-
-   Gunicorn loads the Flask application defined in `wsgi.py` and starts a production-style server.
-
-   The options specify:
-
-   * **`--workers 4`** – run four worker processes to handle requests concurrently
-   * **`--threads 4`** – each worker can handle multiple requests using threads
-   * **`--timeout 120`** – requests may run for up to 120 seconds before being terminated
-   * **`--bind 0.0.0.0:5000`** – listen on port `5000` on all network interfaces
-
-After running the script, Bibry will be available at:
-
-```
-http://localhost:5000
+```bash
+docker compose up --build
 ```
 
-If the machine is accessible on a local network, the server can also be reached using the host machine’s IP address on port `5000`.
+Or use the convenience wrapper:
 
-
-## Running Manually
-
-Create a Python environment and install dependencies:
-
-```
-pip install -r requirements.txt
-```
-
-Run the development server:
-
-```
-python wsgi.py
-```
-
-Or run it with Gunicorn:
-
-```
-gunicorn wsgi:app
+```bash
+./run.sh
 ```
 
 Then open:
 
-```
+```text
 http://localhost:5000
 ```
 
----
+The Compose setup:
+
+* builds the image from the local `Dockerfile`
+* runs Gunicorn inside the container
+* exposes Bibry on port `5000`
+* bind-mounts `bib/` and `pdf/` so your data stays on the host
+
+To run in the background:
+
+```bash
+docker compose up --build -d
+```
+
+To stop it:
+
+```bash
+docker compose down
+```
+
+To rebuild after code changes:
+
+```bash
+docker compose up --build
+```
+
+## Manual Python Run
+
+Docker is the default and recommended path, but you can still run Bibry directly with Python if needed.
+
+Install dependencies:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Run with Gunicorn:
+
+```bash
+gunicorn wsgi:app \
+  --workers 4 \
+  --threads 4 \
+  --timeout 120 \
+  --bind 0.0.0.0:5000
+```
+
+Or run the Flask entrypoint directly:
+
+```bash
+python wsgi.py
+```
+
+## Deployment Notes
+
+For a home server, the simplest setup is usually:
+
+* run Bibry with Docker Compose
+* expose it only on your LAN or VPN
+* optionally place a reverse proxy in front if you want a nicer hostname or TLS
+
+Bibry is intended for personal use, so exposing it directly to the public internet is not recommended.
 
 ## Philosophy
 
-Bibry intentionally avoids complex infrastructure.
-The goal is to provide a fast and practical interface for working with BibTeX libraries while keeping the entire system transparent and easy to modify.
+Bibry intentionally avoids complex infrastructure. The goal is to provide a fast and practical interface for working with BibTeX libraries while keeping the whole system transparent and easy to modify.
 
-Your bibliography remains a normal `.bib` file that can be edited, version-controlled, or used with LaTeX as usual.
+Your bibliography remains a normal set of `.bib` files that can be edited, version-controlled, backed up, or used with LaTeX as usual.
