@@ -68,6 +68,25 @@ def _entry_preview(raw):
 def api_version():
     return jsonify({"version": bibstore.BIB_VERSION})
 
+
+@api_bp.route("/bibs")
+def api_bibs():
+    return jsonify({"items": bibstore.list_bib_files()})
+
+
+@api_bp.route("/bibs/select", methods=["POST"])
+def api_select_bib():
+    filename = request.json.get("filename", "")
+    if not filename:
+        abort(400, "Bib filename is required")
+    try:
+        bibstore.set_current_bib_filename(filename)
+    except FileNotFoundError:
+        abort(404, "Bib file not found")
+    except ValueError as exc:
+        abort(400, str(exc))
+    return jsonify({"ok": True, "filename": bibstore.get_current_bib_filename()})
+
 # Endpoint: list all entries (with metadata)
 @api_bp.route("/entries")
 def api_entries():
@@ -124,12 +143,13 @@ def api_sanitize():
 # Endpoint: Undo last change
 @api_bp.route("/undo", methods=["POST"])
 def api_undo():
-    if bibstore.LAST_BIB_STATE is None:
+    last_state = bibstore.get_last_bib_state()
+    if last_state is None:
         abort(400, "Nothing to undo")
     # Swap current and last states
-    current = bibstore.BIBFILE.read_text(encoding="utf-8")
-    bibstore.save_bib_text(bibstore.LAST_BIB_STATE, action="undo")
-    bibstore.LAST_BIB_STATE = current
+    current = bibstore.get_current_bib_path().read_text(encoding="utf-8")
+    bibstore.save_bib_text(last_state, action="undo")
+    bibstore.set_last_bib_state(current)
     return jsonify({"ok": True})
 
 # Serve PDF files
@@ -224,8 +244,9 @@ def api_import_entries():
         abort(400, "No entries selected for import")
 
     current_text = ""
-    if bibstore.BIBFILE.exists():
-        current_text = bibstore.BIBFILE.read_text(encoding="utf-8").strip()
+    current_bib = bibstore.get_current_bib_path()
+    if current_bib.exists():
+        current_text = current_bib.read_text(encoding="utf-8").strip()
 
     parts = [current_text] if current_text else []
     parts.extend(raw.strip() for raw in selected_entries if isinstance(raw, str) and raw.strip())

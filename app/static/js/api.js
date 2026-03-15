@@ -19,6 +19,20 @@ export async function fetchEntries() {
   return await res.json();
 }
 
+export async function fetchBibFiles() {
+  const res = await fetch("/api/bibs");
+  return await parseResponse(res);
+}
+
+export async function selectBibFile(filename) {
+  const res = await fetch("/api/bibs/select", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename }),
+  });
+  return await parseResponse(res);
+}
+
 export async function fetchRawEntry(key) {
   const res = await fetch(`/api/entry/${key}`);
   return await res.json();

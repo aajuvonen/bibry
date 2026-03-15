@@ -3,6 +3,8 @@
 
 import {
   fetchEntries,
+  fetchBibFiles,
+  selectBibFile,
   undoLast,
   previewImportFile,
   importEntries as importSelectedEntries,
@@ -44,6 +46,17 @@ async function loadEntries() {
   allEntries = await fetchEntries();
   buildIndex(allEntries);
   filterAndRender();
+}
+
+async function refreshBibFileButton() {
+  const btn = getEl("bibFileBtn");
+  if (!btn) return;
+  const res = await fetchBibFiles();
+  if (!res.ok) {
+    throw new Error(res.description || res.error || "Failed to load bib files");
+  }
+  const current = (res.items || []).find((item) => item.selected);
+  btn.textContent = current ? current.filename : "main.bib";
 }
 
 function findEntryByKey(key) {
@@ -722,6 +735,24 @@ function buildHistoryItems(items) {
   }));
 }
 
+function buildBibFileItems(items) {
+  return items.map((item) => ({
+    id: item.filename,
+    key: item.filename,
+    title: item.filename,
+    meta: pickerMeta([
+      `${item.entry_count} entries`,
+      `created ${item.created_at}`,
+      `updated ${item.modified_at}`,
+    ]),
+    selected: Boolean(item.selected),
+    badge: item.selected ? "Current" : "",
+    searchText: [item.filename, item.entry_count, item.created_at, item.modified_at]
+      .join(" ")
+      .toLowerCase(),
+  }));
+}
+
 async function runImport(file) {
   const preview = await previewImportFile(file);
   if (!preview.ok) {
@@ -817,6 +848,35 @@ async function openHistoryPicker() {
   });
 }
 
+async function openBibFilePicker() {
+  const res = await fetchBibFiles();
+  if (!res.ok) {
+    throw new Error(res.description || res.error || "Failed to load bib files");
+  }
+
+  openPicker({
+    mode: "bib-file",
+    title: "Select Bib File",
+    subtitle: "Choose the active bibliography from bib/.",
+    confirmText: "Use File",
+    emptyMessage: "No bib files found in bib/.",
+    items: buildBibFileItems(res.items || []),
+    singleSelect: true,
+    onConfirm: async (selectedItems) => {
+      const [selected] = selectedItems;
+      const selectRes = await selectBibFile(selected.id);
+      if (!selectRes.ok) {
+        throw new Error(selectRes.description || selectRes.error || "Failed to switch bib file");
+      }
+      currentEntry = null;
+      if (editor) editor.value = "";
+      await loadEntries();
+      await refreshBibFileButton();
+      showToast(`Switched to ${selected.id}`);
+    },
+  });
+}
+
 async function openImportFilePicker() {
   const input = getEl("bibFileInput");
   if (!input) return;
@@ -869,6 +929,14 @@ function initUI() {
   getEl("addBtn")?.addEventListener("click", addEntry);
   getEl("undoBtn")?.addEventListener("click", handleUndo);
   getEl("copyBtn")?.addEventListener("click", copyCurrent);
+  getEl("bibFileBtn")?.addEventListener("click", async () => {
+    try {
+      await openBibFilePicker();
+    } catch (err) {
+      console.error("Bib file switcher failed:", err);
+      alert(err.message || "Failed to load bib files");
+    }
+  });
   getEl("importToolbarBtn")?.addEventListener("click", openImportFilePicker);
   getEl("exportToolbarBtn")?.addEventListener("click", openExportPicker);
   getEl("historyToolbarBtn")?.addEventListener("click", async () => {
@@ -997,8 +1065,8 @@ function initUI() {
 
 document.addEventListener("DOMContentLoaded", () => {
   initUI();
-  loadEntries().catch((err) => {
+  Promise.all([loadEntries(), refreshBibFileButton()]).catch((err) => {
     console.error("Failed to load entries:", err);
-    alert(err.message || "Failed to load entries");
+    alert(err.message || "Failed to load bibliography");
   });
 });
