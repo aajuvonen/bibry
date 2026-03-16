@@ -239,7 +239,11 @@ bh_unicode_properties.cache
 # https://packagecontrol.io/packages/sublime-github
 GitHub.sublime-settings
 
-# End of https://www.toptal.com/developers/gitignore/api/macos,sublimetext,python
-
-pdf/
-bib/history/
+# Bibry local data
+bib/*
+!bib/.gitkeep
+!bib/history/
+bib/history/*
+!bib/history/.gitkeep
+pdf/*
+!pdf/.gitkeep
