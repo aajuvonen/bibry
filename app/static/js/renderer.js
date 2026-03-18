@@ -13,6 +13,37 @@ export function extractLatexUrl(text){
   return plainMatch[0].replace(/[}>]+$/, "")
 }
 
+function escapeHtml(value = "") {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+const statusIconMap = {
+  retracted: { icon: "fa-exclamation-triangle", className: "entry-status-retracted" },
+  withdrawn: { icon: "fa-ban", className: "entry-status-withdrawn" },
+};
+
+export function createStatusIcons(statuses = []) {
+  if (!Array.isArray(statuses) || !statuses.length) {
+    return null;
+  }
+  const wrap = document.createElement("span");
+  wrap.className = "entry-status-icons";
+  statuses.forEach((status) => {
+    const config = statusIconMap[status.name] || { icon: "fa-flag", className: "" };
+    const icon = document.createElement("span");
+    icon.className = `entry-status-icon ${config.className}`.trim();
+    icon.title = [status.label, status.source].filter(Boolean).join(" • ");
+    icon.innerHTML = `<i class="fa ${config.icon}" aria-hidden="true"></i><span class="visually-hidden">${escapeHtml(status.label || status.name || "status")}</span>`;
+    wrap.appendChild(icon);
+  });
+  return wrap;
+}
+
 function extractArxiv(fields){
   if(!fields.archiveprefix || !fields.eprint)
       return null
@@ -66,6 +97,13 @@ export function createCard(entry) {
     ${venue ? `<span class="bib-entry-meta d-block">${venue}</span>` : ""}
     ${mutedParts ? `<span class="bib-entry-muted d-block">${mutedParts}</span>` : ""}
   `;
+
+  const titleEl = card.querySelector(".bib-entry-title");
+  const statusIcons = createStatusIcons(entry.statuses || []);
+  if (titleEl && statusIcons) {
+    titleEl.appendChild(document.createTextNode(" "));
+    titleEl.appendChild(statusIcons);
+  }
 
   const actions = document.createElement("div");
   actions.className = "actions";

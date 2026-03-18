@@ -3,6 +3,9 @@
 
 import {
   fetchEntries,
+  runQualityScan,
+  applyQualityScanItem,
+  rejectQualityScanItem,
   fetchBibFiles,
   selectBibFile,
   undoLast,
@@ -13,7 +16,7 @@ import {
   restoreHistory,
 } from "./api.js";
 import { buildIndex, applyFilters } from "./filters.js";
-import { createCard, getIconClass, extractLatexUrl } from "./renderer.js";
+import { createCard, createStatusIcons, getIconClass, extractLatexUrl } from "./renderer.js";
 
 let allEntries = [];
 let filteredEntries = [];
@@ -233,6 +236,34 @@ function importStatusBadge(status) {
   return "";
 }
 
+function qualityStatusBadge(item) {
+  const count = item.patch?.changed_fields?.length || 0;
+  const labels = [];
+  if ((item.status_flags || []).includes("retracted")) labels.push("Retracted");
+  if ((item.status_flags || []).includes("withdrawn")) labels.push("Withdrawn");
+  if (count) labels.push(`${count} field${count === 1 ? "" : "s"}`);
+  return labels.join(" • ") || "Patch";
+}
+
+function getSelectedPickerItem() {
+  if (!pickerState) return null;
+  return pickerState.items.find((item) => item.selected) || null;
+}
+
+function removePickerItem(itemId) {
+  if (!pickerState) return;
+  const nextItems = pickerState.items.filter((item) => item.id !== itemId);
+  pickerState.items = nextItems;
+  if (nextItems.length && !nextItems.some((item) => item.selected)) {
+    nextItems[0].selected = true;
+  }
+  if (!nextItems.length) {
+    closePicker();
+    return;
+  }
+  renderPickerList();
+}
+
 function renderImportPreview(item) {
   if (item.status === "new") {
     return `<div class="text-muted small">This entry is new and will be added if selected.</div>`;
@@ -269,6 +300,51 @@ function renderImportPreview(item) {
     <div class="fw-semibold">${escapeHtml(conflict.incoming?.title || item.title || "(No title)")}</div>
     <div class="picker-meta mb-2">${escapeHtml(summary || "")}</div>
     <div class="history-change-fields">${fieldsHtml}</div>
+  `;
+}
+
+function renderQualityPreview(item) {
+  const changes = item.patch?.changed_fields || [];
+  const statusFlags = item.status_flags || [];
+  const statusHtml = statusFlags.length
+    ? `<div class="picker-meta mb-2">${escapeHtml(statusFlags.join(" • "))}</div>`
+    : "";
+  const fieldsHtml = changes.length
+    ? changes.map((field) => {
+      const fragments = diffMarkup(field.before || "", field.after || "");
+      return `
+        <div class="history-field">
+          <span class="text-muted">${escapeHtml(field.field)}:</span>
+          <span>${fragments.before || "&nbsp;"}</span>
+          <span class="history-arrow">→</span>
+          <span>${fragments.after || "&nbsp;"}</span>
+        </div>
+      `;
+    }).join("")
+    : `<div class="text-muted small">No field-level changes were proposed.</div>`;
+
+  const provenanceBits = [
+    item.provenance?.source || item.source,
+    item.provenance?.identifier_used,
+    formatTimestampLabel(item.provenance?.scanned_at || ""),
+  ].filter(Boolean).join(" • ");
+
+  return `
+    <div class="fw-semibold">${escapeHtml(item.title || "(No title)")}</div>
+    <div class="picker-meta">${escapeHtml(item.summary || "")}</div>
+    ${statusHtml}
+    ${provenanceBits ? `<div class="picker-meta mb-2">${escapeHtml(provenanceBits)}</div>` : ""}
+    <div class="history-change-fields mb-3">${fieldsHtml}</div>
+    <div class="scan-preview-raw">
+      <div>
+        <div class="small text-muted mb-1">Current</div>
+        <pre>${escapeHtml(item.current_raw || "")}</pre>
+      </div>
+      <div>
+        <div class="small text-muted mb-1">Proposed</div>
+        <pre>${escapeHtml(item.proposed_raw || "")}</pre>
+      </div>
+    </div>
   `;
 }
 
@@ -377,6 +453,45 @@ function renderPickerList() {
   updatePickerPreview();
 }
 
+function renderPickerActions() {
+  const actions = getEl("pickerActions");
+  if (!actions) return;
+  actions.querySelectorAll(".picker-action-custom").forEach((node) => node.remove());
+
+  const customActions = pickerState?.actions || [];
+  const confirmBtn = getEl("pickerConfirmBtn");
+  if (!customActions.length) {
+    if (confirmBtn) confirmBtn.style.display = "";
+    return;
+  }
+
+  if (confirmBtn) confirmBtn.style.display = "none";
+
+  customActions.forEach((action) => {
+    const button = document.createElement("button");
+    button.className = `picker-action-custom ${action.className || "btn btn-sm btn-outline-secondary"}`;
+    button.textContent = action.label;
+    button.addEventListener("click", async () => {
+      const selectedItem = getSelectedPickerItem();
+      if (action.requiresSelection !== false && !selectedItem) {
+        alert("Select an entry.");
+        return;
+      }
+
+      button.disabled = true;
+      try {
+        await action.onClick(selectedItem);
+      } catch (err) {
+        console.error(`${pickerState?.mode || "picker"} action failed:`, err);
+        alert(err.message || "Action failed");
+      } finally {
+        button.disabled = false;
+      }
+    });
+    actions.appendChild(button);
+  });
+}
+
 function closePicker() {
   pickerState = null;
   const backdrop = getEl("pickerBackdrop");
@@ -386,6 +501,12 @@ function closePicker() {
   }
   const search = getEl("pickerSearch");
   if (search) search.value = "";
+  const confirmBtn = getEl("pickerConfirmBtn");
+  if (confirmBtn) confirmBtn.style.display = "";
+  const actions = getEl("pickerActions");
+  if (actions) {
+    actions.querySelectorAll(".picker-action-custom").forEach((node) => node.remove());
+  }
   updatePickerPreview();
 }
 
@@ -404,6 +525,7 @@ function openPicker(config) {
     previewLabel: config.previewLabel || "",
     previewEmptyText: config.previewEmptyText || "",
     previewRenderer: config.previewRenderer || null,
+    actions: config.actions || [],
   };
 
   const backdrop = getEl("pickerBackdrop");
@@ -430,6 +552,7 @@ function openPicker(config) {
   }
 
   renderPickerList();
+  renderPickerActions();
 }
 
 function getSortField() {
@@ -652,6 +775,12 @@ function createListEntry(entry) {
   const text = document.createElement("span");
   text.innerHTML = citation;
   div.appendChild(text);
+
+  const statusIcons = createStatusIcons(entry.statuses || []);
+  if (statusIcons) {
+    statusIcons.classList.add("ms-2");
+    div.appendChild(statusIcons);
+  }
 
   // ----- action icons (PDF / URL / arXiv / DOI) -----
 
@@ -890,6 +1019,29 @@ function buildImportItems(entries) {
   }));
 }
 
+function buildQualityScanItems(items) {
+  return items.map((item, index) => ({
+    ...item,
+    id: item.id,
+    key: item.key || "",
+    title: item.title || "",
+    meta: item.summary || "",
+    selected: index === 0,
+    badge: qualityStatusBadge(item),
+    searchText: [
+      item.key,
+      item.title,
+      item.summary,
+      item.source,
+      item.provenance?.identifier_used,
+      ...(item.status_flags || []),
+      ...((item.patch?.changed_fields || []).flatMap((field) => [field.field, field.before, field.after])),
+    ]
+      .join(" ")
+      .toLowerCase(),
+  }));
+}
+
 function buildExportItems() {
   return allEntries.map((entry) => ({
     id: `export-${entry.key}`,
@@ -972,6 +1124,86 @@ function buildBibFileItems(items) {
       .join(" ")
       .toLowerCase(),
   }));
+}
+
+async function openQualityScanPicker() {
+  const res = await runQualityScan();
+  if (!res.ok) {
+    throw new Error(res.description || res.error || "Quality scan failed");
+  }
+
+  const items = buildQualityScanItems(res.items || []);
+  if (!items.length) {
+    showToast("No actionable Crossref updates found");
+    return;
+  }
+
+  openPicker({
+    mode: "quality-scan",
+    title: "Quality Scan",
+    subtitle: "Review each proposed BibLaTeX amendment. Nothing is written until you accept or save an edited proposal.",
+    confirmText: "Apply",
+    emptyMessage: "No actionable entries in this scan.",
+    items,
+    singleSelect: true,
+    showPreview: true,
+    previewLabel: "Proposed amendment",
+    previewEmptyText: "Select an entry to preview its proposed amendment.",
+    previewRenderer: renderQualityPreview,
+    actions: [
+      {
+        label: "Accept",
+        className: "btn btn-sm btn-primary",
+        onClick: async (selected) => {
+          const applyRes = await applyQualityScanItem(selected);
+          if (!applyRes.ok) {
+            throw new Error(applyRes.description || applyRes.error || "Failed to apply patch");
+          }
+          await loadEntries();
+          currentEntry = findEntryByKey(selected.key);
+          if (currentEntry && editor) {
+            editor.value = currentEntry.raw || "";
+          }
+          removePickerItem(selected.id);
+          showToast(`Applied scan patch for ${selected.key}`);
+        },
+      },
+      {
+        label: "Edit",
+        className: "btn btn-sm btn-outline-secondary",
+        onClick: async (selected) => {
+          currentEntry = findEntryByKey(selected.key);
+          if (editor) {
+            editor.value = selected.proposed_raw || "";
+          }
+          updateSelectedCardState();
+          closePicker();
+          showToast(`Loaded proposed patch for ${selected.key}`);
+        },
+      },
+      {
+        label: "Reject",
+        className: "btn btn-sm btn-outline-danger",
+        onClick: async (selected) => {
+          const suppress = window.confirm("Suppress this exact suggestion on future scans?\nChoose OK to suppress or Cancel to dismiss it for now.");
+          const rejectRes = await rejectQualityScanItem(selected, suppress);
+          if (!rejectRes.ok) {
+            throw new Error(rejectRes.description || rejectRes.error || "Failed to reject suggestion");
+          }
+          removePickerItem(selected.id);
+          showToast(suppress ? `Suppressed ${selected.key}` : `Rejected ${selected.key}`);
+        },
+      },
+      {
+        label: "Close",
+        className: "btn btn-sm btn-outline-secondary",
+        requiresSelection: false,
+        onClick: async () => {
+          closePicker();
+        },
+      },
+    ],
+  });
 }
 
 async function runImport(file) {
@@ -1163,6 +1395,14 @@ function initUI() {
     }
   });
   getEl("importToolbarBtn")?.addEventListener("click", openImportFilePicker);
+  getEl("scanToolbarBtn")?.addEventListener("click", async () => {
+    try {
+      await openQualityScanPicker();
+    } catch (err) {
+      console.error("Quality scan failed:", err);
+      alert(err.message || "Quality scan failed");
+    }
+  });
   getEl("exportToolbarBtn")?.addEventListener("click", openExportPicker);
   getEl("historyToolbarBtn")?.addEventListener("click", async () => {
     try {

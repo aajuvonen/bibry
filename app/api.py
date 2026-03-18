@@ -3,7 +3,9 @@ from flask import Blueprint, jsonify, request, abort, send_from_directory, Respo
 import bibtexparser
 
 from . import bibstore
+from .enrichment import CrossrefScanner, build_entries_by_key
 from .latex import latex_to_text
+from .metadata_store import get_entry_metadata, set_entry_provenance, set_suppression
 from .sort_dedupe_bibtex import BibEntry, process_bibtex_text, split_entries
 
 api_bp = Blueprint('api', __name__)
@@ -12,6 +14,7 @@ api_bp = Blueprint('api', __name__)
 PDF_DIR = bibstore.ROOT / "pdf"
 _ENTRY_CACHE_SIGNATURE = object()
 _ENTRY_CACHE_BASE = None
+_crossref_scanner = CrossrefScanner()
 
 
 def _build_entry_cache():
@@ -46,6 +49,22 @@ def _build_entry_cache():
 
 def warm_entries_cache():
     _build_entry_cache()
+
+
+def _entry_statuses(key):
+    metadata = get_entry_metadata(key)
+    flags = metadata.get("flags", {}) if isinstance(metadata, dict) else {}
+    statuses = []
+    for name in ("retracted", "withdrawn"):
+        payload = flags.get(name)
+        if isinstance(payload, dict) and payload.get("active"):
+            statuses.append({
+                "name": name,
+                "label": payload.get("label") or name.title(),
+                "source": payload.get("source") or "",
+                "updated_at": payload.get("updated_at") or "",
+            })
+    return statuses, metadata
 
 
 def _entry_preview(raw):
@@ -139,12 +158,15 @@ def api_entries():
     pdf_files = {p.stem for p in PDF_DIR.glob("*.pdf")}
     out = []
     for entry in _build_entry_cache():
+        statuses, metadata = _entry_statuses(entry["key"])
         out.append({
             "key": entry["key"],
             "type": entry["type"],
             "fields": entry["fields"],
             "raw": entry["raw"],
-            "has_pdf": entry["key"] in pdf_files
+            "has_pdf": entry["key"] in pdf_files,
+            "statuses": statuses,
+            "metadata": metadata,
         })
     return jsonify(out)
 
@@ -395,3 +417,62 @@ def api_history_restore(revision_id):
         "revision_id": revision_id,
         "timestamp": revision.get("timestamp"),
     })
+
+
+@api_bp.route("/scan/quality", methods=["POST"])
+def api_quality_scan():
+    actionable = _crossref_scanner.scan_entries(build_entries_by_key())
+    actionable.sort(key=lambda item: (item["key"] or "").lower())
+    return jsonify({"items": actionable})
+
+
+@api_bp.route("/scan/quality/apply", methods=["POST"])
+def api_quality_apply():
+    key = request.json.get("key", "")
+    raw = request.json.get("raw", "")
+    basis_signature = request.json.get("basis_signature")
+    suggestion_id = request.json.get("id", "")
+    provenance = request.json.get("provenance") or {}
+
+    if not key or not raw:
+        abort(400, "Scan item key and proposed raw entry are required")
+
+    db = bibstore.load_bib()
+    existing_index = next((index for index, entry in enumerate(db.entries) if entry.get("ID") == key), None)
+    if existing_index is None:
+        abort(404, "Entry not found")
+
+    existing_entry = db.entries[existing_index]
+    if basis_signature and _entry_signature(existing_entry) != basis_signature:
+        abort(409, "Entry changed since the scan ran; rerun the scan before applying this patch")
+
+    parser = bibtexparser.bparser.BibTexParser(common_strings=True)
+    newdb = bibtexparser.loads(raw, parser=parser)
+    if len(newdb.entries) != 1:
+        abort(400, "Invalid proposed entry")
+
+    db.entries[existing_index] = newdb.entries[0]
+    bibstore.save_bib(db, action="quality-scan-apply")
+    if suggestion_id:
+        set_entry_provenance(key, "phase1_crossref_last_apply", {
+            "source": provenance.get("source") or "Crossref",
+            "identifier_used": provenance.get("identifier_used") or "",
+            "applied_at": provenance.get("scanned_at") or "",
+            "suggestion_id": suggestion_id,
+        })
+    return jsonify({"ok": True, "key": key})
+
+
+@api_bp.route("/scan/quality/reject", methods=["POST"])
+def api_quality_reject():
+    key = request.json.get("key", "")
+    suggestion_id = request.json.get("id", "")
+    fingerprint = request.json.get("fingerprint", "")
+    suppress = bool(request.json.get("suppress"))
+
+    if not key or not suggestion_id:
+        abort(400, "Scan item key and id are required")
+
+    if suppress:
+        set_suppression(key, suggestion_id, {"fingerprint": fingerprint})
+    return jsonify({"ok": True, "key": key, "suppressed": suppress})

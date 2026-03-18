@@ -19,6 +19,42 @@ export async function fetchEntries() {
   return await res.json();
 }
 
+export async function runQualityScan() {
+  const res = await fetch("/api/scan/quality", {
+    method: "POST",
+  });
+  return await parseResponse(res);
+}
+
+export async function applyQualityScanItem(item) {
+  const res = await fetch("/api/scan/quality/apply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id: item.id,
+      key: item.key,
+      raw: item.proposed_raw,
+      basis_signature: item.basis_signature,
+      provenance: item.provenance || {},
+    }),
+  });
+  return await parseResponse(res);
+}
+
+export async function rejectQualityScanItem(item, suppress = false) {
+  const res = await fetch("/api/scan/quality/reject", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id: item.id,
+      key: item.key,
+      fingerprint: item.patch?.fingerprint || "",
+      suppress,
+    }),
+  });
+  return await parseResponse(res);
+}
+
 export async function fetchBibFiles() {
   const res = await fetch("/api/bibs");
   return await parseResponse(res);
