@@ -19,15 +19,22 @@ export async function fetchEntries() {
   return await res.json();
 }
 
-export async function runQualityScan() {
-  const res = await fetch("/api/scan/quality", {
+export async function fetchScanServices() {
+  const res = await fetch("/api/scan/services");
+  return await parseResponse(res);
+}
+
+export async function runScan(service) {
+  const res = await fetch("/api/scan/run", {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ service }),
   });
   return await parseResponse(res);
 }
 
-export async function applyQualityScanItem(item) {
-  const res = await fetch("/api/scan/quality/apply", {
+export async function applyScanItem(item) {
+  const res = await fetch("/api/scan/review/apply", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -41,8 +48,8 @@ export async function applyQualityScanItem(item) {
   return await parseResponse(res);
 }
 
-export async function rejectQualityScanItem(item, suppress = false) {
-  const res = await fetch("/api/scan/quality/reject", {
+export async function rejectScanItem(item, suppress = false) {
+  const res = await fetch("/api/scan/review/reject", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -51,6 +58,15 @@ export async function rejectQualityScanItem(item, suppress = false) {
       fingerprint: item.patch?.fingerprint || "",
       suppress,
     }),
+  });
+  return await parseResponse(res);
+}
+
+export async function clearScanRejections(phase = "") {
+  const res = await fetch("/api/scan/rejections/clear", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ phase }),
   });
   return await parseResponse(res);
 }

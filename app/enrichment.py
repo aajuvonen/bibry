@@ -1,11 +1,13 @@
 import hashlib
 import json
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from urllib.parse import quote
+from html import unescape
+from urllib.parse import quote, urljoin
 
 import bibtexparser
 import requests
@@ -44,10 +46,12 @@ REMOVABLE_FIELDS = {"journal", "booktitle"}
 ARXIV_URL_RE = re.compile(r"https?://arxiv\.org/(?:abs|pdf)/([^/?#]+)", re.I)
 WITHDRAWN_RE = re.compile(r"\bwithdrawn\b", re.I)
 RETRACTED_RE = re.compile(r"\bretract(?:ed|ion)\b", re.I)
+ISBN_SPLIT_RE = re.compile(r"[^0-9Xx]+")
 XML_NS = {
     "atom": "http://www.w3.org/2005/Atom",
     "arxiv": "http://arxiv.org/schemas/atom",
 }
+BOOK_LIKE_TYPES = {"book", "inbook", "incollection", "phdthesis", "mastersthesis", "thesis"}
 
 
 def _utc_now():
@@ -186,8 +190,15 @@ class CachedHttpClient:
 
 
 class CrossrefScanner:
+    service_name = "crossref"
+    display_name = "Crossref"
+    phase_name = SCAN_PHASE
+
     def __init__(self):
         self.http = CachedHttpClient()
+
+    def availability(self):
+        return {"available": True, "reason": ""}
 
     def scan_entries(self, entries_by_key):
         actionable = []
@@ -229,7 +240,7 @@ class CrossrefScanner:
         if not patch["changed_fields"]:
             return None
 
-        suggestion_id = f"{SCAN_PHASE}:{patch['fingerprint']}"
+        suggestion_id = f"{self.phase_name}:{patch['fingerprint']}"
         metadata = get_entry_metadata(key)
         suppressed = ((metadata.get("suppressed") or {}).get(suggestion_id) or {})
         if suppressed.get("fingerprint") == patch["fingerprint"]:
@@ -241,12 +252,13 @@ class CrossrefScanner:
 
         return {
             "id": suggestion_id,
-            "phase": SCAN_PHASE,
+            "phase": self.phase_name,
+            "service": self.service_name,
             "key": key,
             "title": _clean_text(entry.get("title") or candidate_fields.get("title")),
             "type": (entry.get("ENTRYTYPE") or proposed_entry.get("ENTRYTYPE") or "").lower(),
             "summary": self._summary(entry, candidate_fields),
-            "source": "Crossref",
+            "source": self.display_name,
             "status_flags": patch["status_flags"],
             "basis_signature": _entry_signature(entry),
             "provenance": provenance,
@@ -542,3 +554,293 @@ def build_entries_by_key():
         for entry in db.entries
         if entry.get("ID")
     }
+
+
+def _normalize_isbn(value):
+    parts = ISBN_SPLIT_RE.split(_clean_text(value).upper())
+    for part in parts:
+        if len(part) in {10, 13}:
+            return part
+    return ""
+
+
+def _html_title(text):
+    match = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
+    return _clean_text(unescape(match.group(1))) if match else ""
+
+
+def _meta_content(text, name):
+    match = re.search(rf'<meta[^>]+(?:property|name)=["\']{re.escape(name)}["\'][^>]+content=["\'](.*?)["\']', text, re.I | re.S)
+    return _clean_text(unescape(match.group(1))) if match else ""
+
+
+def _first_match(text, pattern):
+    match = re.search(pattern, text, re.I | re.S)
+    return _clean_text(unescape(match.group(1))) if match else ""
+
+
+class WorldCatScanner:
+    service_name = "worldcat"
+    display_name = "WorldCat"
+    phase_name = "phase2_worldcat"
+    base_url = "https://search.worldcat.org"
+
+    def __init__(self):
+        self.http = CachedHttpClient()
+
+    def availability(self):
+        return {
+            "available": True,
+            "reason": "Uses public WorldCat catalog pages; official OCLC API credentials are not configured in this app.",
+        }
+
+    def scan_entries(self, entries_by_key):
+        actionable = []
+        for key, entry in entries_by_key.items():
+            item = self.scan_entry(entry)
+            if item is not None:
+                actionable.append(item)
+        return actionable
+
+    def scan_entry(self, entry):
+        entry_type = (entry.get("ENTRYTYPE") or "").lower()
+        if entry_type not in BOOK_LIKE_TYPES:
+            return None
+
+        record, identifier_used = self._resolve_worldcat(entry)
+        if not record:
+            set_entry_provenance(entry.get("ID"), self.phase_name, {
+                "phase": self.phase_name,
+                "source": self.service_name,
+                "scanned_at": _utc_now(),
+                "identifier_used": identifier_used,
+                "matched": False,
+            })
+            return None
+
+        candidate_fields = self._build_candidate_fields(entry, record)
+        patch = self._build_patch(entry, candidate_fields)
+        if not patch["changed_fields"]:
+            return None
+
+        key = entry.get("ID")
+        provenance = {
+            "phase": self.phase_name,
+            "source": self.service_name,
+            "scanned_at": _utc_now(),
+            "identifier_used": identifier_used,
+            "matched": True,
+            "worldcat_id": record.get("oclc_number") or "",
+            "record_url": record.get("url") or "",
+        }
+        set_entry_provenance(key, self.phase_name, provenance)
+
+        suggestion_id = f"{self.phase_name}:{patch['fingerprint']}"
+        metadata = get_entry_metadata(key)
+        suppressed = ((metadata.get("suppressed") or {}).get(suggestion_id) or {})
+        if suppressed.get("fingerprint") == patch["fingerprint"]:
+            return None
+
+        proposed_entry = self._apply_patch(entry, patch)
+        return {
+            "id": suggestion_id,
+            "phase": self.phase_name,
+            "service": self.service_name,
+            "key": key,
+            "title": _clean_text(entry.get("title") or candidate_fields.get("title")),
+            "type": entry_type,
+            "summary": " • ".join(filter(None, [
+                _clean_text(entry.get("author") or entry.get("editor")),
+                _clean_text(entry.get("year") or candidate_fields.get("year")),
+                entry_type,
+            ])),
+            "source": self.display_name,
+            "status_flags": [],
+            "basis_signature": _entry_signature(entry),
+            "provenance": provenance,
+            "patch": patch,
+            "current_raw": self._serialize_entry(entry).strip(),
+            "proposed_raw": self._serialize_entry(proposed_entry).strip(),
+        }
+
+    def _resolve_worldcat(self, entry):
+        isbn = _normalize_isbn(entry.get("isbn"))
+        if isbn:
+            record = self._fetch_worldcat_record(f"https://www.worldcat.org/isbn/{quote(isbn)}")
+            if record:
+                return record, "isbn"
+
+        title = _clean_text(entry.get("title"))
+        author = _clean_text(entry.get("author") or entry.get("editor"))
+        if not title:
+            return None, "none"
+        query = " ".join(filter(None, [title, author]))
+        search_url = f"{self.base_url}/search?q={quote(query)}"
+        search_html = self.http.get_text("worldcat-search", search_url)
+        if not search_html:
+            return None, "title-author"
+
+        match = re.search(r'href=["\'](?P<href>/title/[^"\']+)["\']', search_html, re.I)
+        if not match:
+            return None, "title-author"
+        href = match.group("href")
+        record = self._fetch_worldcat_record(urljoin(self.base_url, href))
+        if not record:
+            return None, "title-author"
+        return record, "title-author"
+
+    def _fetch_worldcat_record(self, url):
+        html = self.http.get_text("worldcat-record", url)
+        if not html:
+            return None
+
+        title = (
+            _meta_content(html, "og:title")
+            or _first_match(html, r"<h1[^>]*>(.*?)</h1>")
+            or _html_title(html)
+        )
+        if not title:
+            return None
+
+        author = (
+            _meta_content(html, "og:description")
+            or _first_match(html, r"Author:\s*([^<\n]+)")
+        )
+        publisher_line = _first_match(html, r"Publisher:\s*([^<\n]+)")
+        edition = _first_match(html, r"Edition:\s*([^<\n]+)")
+        isbn_line = _first_match(html, r"ISBN:\s*([^<\n]+)") or _first_match(html, r"ISBNs?:\s*([^<\n]+)")
+        oclc_number = _first_match(html, r"OCLC Number / Unique Identifier:\s*([0-9]+)") or _first_match(html, r'"oclcNumber"\s*:\s*"([0-9]+)"')
+
+        publisher = ""
+        year = ""
+        if publisher_line:
+            parts = [part.strip() for part in publisher_line.split(",") if part.strip()]
+            if parts:
+                publisher = parts[0]
+                for part in reversed(parts):
+                    year_match = re.search(r"(1[5-9]\d{2}|20\d{2}|2100)", part)
+                    if year_match:
+                        year = year_match.group(1)
+                        break
+
+        isbns = []
+        for part in ISBN_SPLIT_RE.split(isbn_line.upper()):
+            if len(part) in {10, 13}:
+                isbns.append(part)
+
+        return {
+            "url": url,
+            "oclc_number": oclc_number,
+            "title": title,
+            "author": author,
+            "publisher": publisher,
+            "year": year,
+            "edition": edition,
+            "isbns": isbns,
+        }
+
+    def _build_candidate_fields(self, entry, record):
+        candidate = {}
+        isbn = _normalize_isbn(entry.get("isbn"))
+        record_isbn = next((value for value in record.get("isbns") or [] if value), "")
+        if record_isbn:
+            candidate["isbn"] = record_isbn
+
+        title = _clean_text(record.get("title"))
+        current_title = _clean_text(entry.get("title"))
+        if not current_title or SequenceMatcher(None, current_title.lower(), title.lower()).ratio() >= 0.88:
+            candidate["title"] = title
+
+        publisher = _clean_text(record.get("publisher"))
+        current_publisher = _clean_text(entry.get("publisher"))
+        if publisher and (
+            not current_publisher
+            or publisher.lower() in current_publisher.lower()
+            or current_publisher.lower() in publisher.lower()
+            or SequenceMatcher(None, current_publisher.lower(), publisher.lower()).ratio() >= 0.75
+        ):
+            candidate["publisher"] = publisher
+
+        year = _clean_text(record.get("year"))
+        current_year = _clean_text(entry.get("year"))
+        if year and (not current_year or not re.fullmatch(r"\d{4}", current_year)):
+            candidate["year"] = year
+
+        edition = _clean_text(record.get("edition"))
+        current_edition = _clean_text(entry.get("edition"))
+        if edition and (
+            not current_edition
+            or edition.lower() in current_edition.lower()
+            or current_edition.lower() in edition.lower()
+        ):
+            candidate["edition"] = edition
+
+        if not isbn and record_isbn:
+            candidate["isbn"] = record_isbn
+        return candidate
+
+    def _build_patch(self, entry, candidate_fields):
+        tracked_fields = ("isbn", "publisher", "year", "title", "edition")
+        changes = []
+        patch_fields = {}
+        for field in tracked_fields:
+            current = _normalize_field_value(entry.get(field))
+            target = _normalize_field_value(candidate_fields.get(field))
+            if not target or current == target:
+                continue
+            changes.append({
+                "field": field,
+                "action": "add" if not current else "change",
+                "before": current,
+                "after": target,
+            })
+            patch_fields[field] = target
+
+        fingerprint = _fingerprint_payload({
+            "key": entry.get("ID"),
+            "service": self.service_name,
+            "changes": changes,
+        })
+        return {
+            "fields": patch_fields,
+            "removed_fields": [],
+            "changed_fields": changes,
+            "status_flags": [],
+            "fingerprint": fingerprint,
+        }
+
+    def _apply_patch(self, entry, patch):
+        updated = dict(entry)
+        for field, value in patch.get("fields", {}).items():
+            updated[field] = value
+        return updated
+
+    def _serialize_entry(self, entry):
+        db = bibtexparser.bibdatabase.BibDatabase()
+        db.entries = [entry]
+        writer = bibtexparser.bwriter.BibTexWriter()
+        return writer.write(db)
+
+
+SCAN_SERVICES = {
+    CrossrefScanner.service_name: CrossrefScanner(),
+    WorldCatScanner.service_name: WorldCatScanner(),
+}
+
+
+def get_scan_service(name):
+    return SCAN_SERVICES.get(name)
+
+
+def list_scan_services():
+    items = []
+    for name, service in SCAN_SERVICES.items():
+        availability = service.availability()
+        items.append({
+            "name": name,
+            "label": service.display_name,
+            "phase": service.phase_name,
+            "available": bool(availability.get("available")),
+            "reason": availability.get("reason") or "",
+        })
+    return items

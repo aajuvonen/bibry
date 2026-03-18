@@ -3,9 +3,9 @@ from flask import Blueprint, jsonify, request, abort, send_from_directory, Respo
 import bibtexparser
 
 from . import bibstore
-from .enrichment import CrossrefScanner, build_entries_by_key
+from .enrichment import build_entries_by_key, get_scan_service, list_scan_services
 from .latex import latex_to_text
-from .metadata_store import get_entry_metadata, set_entry_provenance, set_suppression
+from .metadata_store import clear_suppressions, get_entry_metadata, set_entry_provenance, set_suppression
 from .sort_dedupe_bibtex import BibEntry, process_bibtex_text, split_entries
 
 api_bp = Blueprint('api', __name__)
@@ -14,7 +14,6 @@ api_bp = Blueprint('api', __name__)
 PDF_DIR = bibstore.ROOT / "pdf"
 _ENTRY_CACHE_SIGNATURE = object()
 _ENTRY_CACHE_BASE = None
-_crossref_scanner = CrossrefScanner()
 
 
 def _build_entry_cache():
@@ -419,15 +418,34 @@ def api_history_restore(revision_id):
     })
 
 
-@api_bp.route("/scan/quality", methods=["POST"])
-def api_quality_scan():
-    actionable = _crossref_scanner.scan_entries(build_entries_by_key())
+@api_bp.route("/scan/services")
+def api_scan_services():
+    return jsonify({"items": list_scan_services()})
+
+
+@api_bp.route("/scan/run", methods=["POST"])
+def api_scan_run():
+    service_name = request.json.get("service", "")
+    scanner = get_scan_service(service_name)
+    if scanner is None:
+        abort(404, "Unknown scan service")
+
+    availability = scanner.availability()
+    if not availability.get("available"):
+        abort(400, availability.get("reason") or "Scan service is unavailable")
+
+    actionable = scanner.scan_entries(build_entries_by_key())
     actionable.sort(key=lambda item: (item["key"] or "").lower())
-    return jsonify({"items": actionable})
+    return jsonify({
+        "service": service_name,
+        "label": scanner.display_name,
+        "phase": scanner.phase_name,
+        "items": actionable,
+    })
 
 
-@api_bp.route("/scan/quality/apply", methods=["POST"])
-def api_quality_apply():
+@api_bp.route("/scan/review/apply", methods=["POST"])
+def api_scan_apply():
     key = request.json.get("key", "")
     raw = request.json.get("raw", "")
     basis_signature = request.json.get("basis_signature")
@@ -463,8 +481,8 @@ def api_quality_apply():
     return jsonify({"ok": True, "key": key})
 
 
-@api_bp.route("/scan/quality/reject", methods=["POST"])
-def api_quality_reject():
+@api_bp.route("/scan/review/reject", methods=["POST"])
+def api_scan_reject():
     key = request.json.get("key", "")
     suggestion_id = request.json.get("id", "")
     fingerprint = request.json.get("fingerprint", "")
@@ -476,3 +494,10 @@ def api_quality_reject():
     if suppress:
         set_suppression(key, suggestion_id, {"fingerprint": fingerprint})
     return jsonify({"ok": True, "key": key, "suppressed": suppress})
+
+
+@api_bp.route("/scan/rejections/clear", methods=["POST"])
+def api_scan_clear_rejections():
+    phase = request.json.get("phase") or ""
+    cleared = clear_suppressions(phase_prefix=phase or None)
+    return jsonify({"ok": True, "cleared": cleared})

@@ -3,9 +3,11 @@
 
 import {
   fetchEntries,
-  runQualityScan,
-  applyQualityScanItem,
-  rejectQualityScanItem,
+  fetchScanServices,
+  runScan,
+  applyScanItem,
+  rejectScanItem,
+  clearScanRejections,
   fetchBibFiles,
   selectBibFile,
   undoLast,
@@ -31,6 +33,12 @@ let sortDir = "desc";
 let viewMode = "grid"; // "grid" or "list"
 let renderToken = 0;
 let pickerState = null;
+let scanState = {
+  services: [],
+  running: false,
+  currentService: "",
+  statusText: "",
+};
 let dragDepth = 0;
 let toastTimer = null;
 let lastSelectedCardKey = null;
@@ -508,6 +516,81 @@ function closePicker() {
     actions.querySelectorAll(".picker-action-custom").forEach((node) => node.remove());
   }
   updatePickerPreview();
+}
+
+function renderScanModal() {
+  const backdrop = getEl("scanBackdrop");
+  const list = getEl("scanServiceList");
+  const status = getEl("scanStatus");
+  const clearBtn = getEl("scanClearRejectionsBtn");
+  const closeBtn = getEl("scanCloseBtn");
+  if (!backdrop || !list || !status || !clearBtn || !closeBtn) return;
+
+  list.innerHTML = "";
+  const fragment = document.createDocumentFragment();
+  for (const service of scanState.services) {
+    const row = document.createElement("div");
+    row.className = "scan-service";
+
+    const info = document.createElement("div");
+    info.className = "scan-service-info";
+    info.innerHTML = `
+      <div class="fw-semibold">${escapeHtml(service.label || service.name)}</div>
+      <div class="small text-muted">${escapeHtml(service.reason || "")}</div>
+    `;
+
+    const button = document.createElement("button");
+    button.className = "btn btn-sm btn-primary";
+    button.textContent = scanState.running && scanState.currentService === service.name
+      ? "Scan underway..."
+      : `Run ${service.label || service.name}`;
+    button.disabled = scanState.running || service.available === false;
+    button.addEventListener("click", async () => {
+      try {
+        await startScanFromModal(service);
+      } catch (err) {
+        console.error("Scan failed:", err);
+        alert(err.message || "Scan failed");
+      }
+    });
+
+    row.appendChild(info);
+    row.appendChild(button);
+    fragment.appendChild(row);
+  }
+  list.appendChild(fragment);
+
+  status.textContent = scanState.statusText || "Choose a scan source.";
+  clearBtn.disabled = scanState.running;
+  closeBtn.disabled = scanState.running;
+}
+
+function openScanModal() {
+  const backdrop = getEl("scanBackdrop");
+  if (!backdrop) return;
+  backdrop.classList.add("open");
+  backdrop.setAttribute("aria-hidden", "false");
+  renderScanModal();
+}
+
+function closeScanModal() {
+  const backdrop = getEl("scanBackdrop");
+  if (!backdrop) return;
+  backdrop.classList.remove("open");
+  backdrop.setAttribute("aria-hidden", "true");
+  scanState.running = false;
+  scanState.currentService = "";
+  scanState.statusText = "";
+  renderScanModal();
+}
+
+async function loadScanServices() {
+  const res = await fetchScanServices();
+  if (!res.ok) {
+    throw new Error(res.description || res.error || "Failed to load scan services");
+  }
+  scanState.services = res.items || [];
+  renderScanModal();
 }
 
 function openPicker(config) {
@@ -1019,7 +1102,7 @@ function buildImportItems(entries) {
   }));
 }
 
-function buildQualityScanItems(items) {
+function buildScanReviewItems(items) {
   return items.map((item, index) => ({
     ...item,
     id: item.id,
@@ -1126,21 +1209,16 @@ function buildBibFileItems(items) {
   }));
 }
 
-async function openQualityScanPicker() {
-  const res = await runQualityScan();
-  if (!res.ok) {
-    throw new Error(res.description || res.error || "Quality scan failed");
-  }
-
-  const items = buildQualityScanItems(res.items || []);
+async function openScanReviewPicker(scanResult) {
+  const items = buildScanReviewItems(scanResult.items || []);
   if (!items.length) {
-    showToast("No actionable Crossref updates found");
+    showToast(`No actionable ${scanResult.label || "scan"} updates found`);
     return;
   }
 
   openPicker({
     mode: "quality-scan",
-    title: "Quality Scan",
+    title: `${scanResult.label || "Scan"} Review`,
     subtitle: "Review each proposed BibLaTeX amendment. Nothing is written until you accept or save an edited proposal.",
     confirmText: "Apply",
     emptyMessage: "No actionable entries in this scan.",
@@ -1155,7 +1233,7 @@ async function openQualityScanPicker() {
         label: "Accept",
         className: "btn btn-sm btn-primary",
         onClick: async (selected) => {
-          const applyRes = await applyQualityScanItem(selected);
+          const applyRes = await applyScanItem(selected);
           if (!applyRes.ok) {
             throw new Error(applyRes.description || applyRes.error || "Failed to apply patch");
           }
@@ -1186,7 +1264,7 @@ async function openQualityScanPicker() {
         className: "btn btn-sm btn-outline-danger",
         onClick: async (selected) => {
           const suppress = window.confirm("Suppress this exact suggestion on future scans?\nChoose OK to suppress or Cancel to dismiss it for now.");
-          const rejectRes = await rejectQualityScanItem(selected, suppress);
+          const rejectRes = await rejectScanItem(selected, suppress);
           if (!rejectRes.ok) {
             throw new Error(rejectRes.description || rejectRes.error || "Failed to reject suggestion");
           }
@@ -1204,6 +1282,44 @@ async function openQualityScanPicker() {
       },
     ],
   });
+}
+
+async function startScanFromModal(service) {
+  scanState.running = true;
+  scanState.currentService = service.name;
+  scanState.statusText = `${service.label || service.name} scan underway... this can take a while.`;
+  renderScanModal();
+
+  try {
+    const res = await runScan(service.name);
+    if (!res.ok) {
+      throw new Error(res.description || res.error || "Scan failed");
+    }
+    scanState.running = false;
+    scanState.currentService = "";
+    scanState.statusText = `${service.label || service.name} scan finished.`;
+    renderScanModal();
+    closeScanModal();
+    await openScanReviewPicker(res);
+  } catch (err) {
+    scanState.running = false;
+    scanState.currentService = "";
+    scanState.statusText = err.message || "Scan failed";
+    renderScanModal();
+    throw err;
+  }
+}
+
+async function handleClearScanRejections() {
+  const res = await clearScanRejections();
+  if (!res.ok) {
+    throw new Error(res.description || res.error || "Failed to clear past rejections");
+  }
+  scanState.statusText = res.cleared
+    ? `Cleared ${res.cleared} past rejection${res.cleared === 1 ? "" : "s"}.`
+    : "No past rejections were stored.";
+  renderScanModal();
+  showToast(scanState.statusText);
 }
 
 async function runImport(file) {
@@ -1397,10 +1513,12 @@ function initUI() {
   getEl("importToolbarBtn")?.addEventListener("click", openImportFilePicker);
   getEl("scanToolbarBtn")?.addEventListener("click", async () => {
     try {
-      await openQualityScanPicker();
+      await loadScanServices();
+      scanState.statusText = "";
+      openScanModal();
     } catch (err) {
-      console.error("Quality scan failed:", err);
-      alert(err.message || "Quality scan failed");
+      console.error("Scan launcher failed:", err);
+      alert(err.message || "Failed to load scan services");
     }
   });
   getEl("exportToolbarBtn")?.addEventListener("click", openExportPicker);
@@ -1440,6 +1558,20 @@ function initUI() {
   }
 
   getEl("pickerCloseBtn")?.addEventListener("click", closePicker);
+  getEl("scanCloseBtn")?.addEventListener("click", closeScanModal);
+  getEl("scanBackdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget && !scanState.running) {
+      closeScanModal();
+    }
+  });
+  getEl("scanClearRejectionsBtn")?.addEventListener("click", async () => {
+    try {
+      await handleClearScanRejections();
+    } catch (err) {
+      console.error("Clear rejections failed:", err);
+      alert(err.message || "Failed to clear past rejections");
+    }
+  });
   getEl("pickerBackdrop")?.addEventListener("click", (event) => {
     if (event.target === event.currentTarget) {
       closePicker();
@@ -1493,6 +1625,10 @@ function initUI() {
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && pickerState) {
       closePicker();
+      return;
+    }
+    if (event.key === "Escape" && getEl("scanBackdrop")?.classList.contains("open") && !scanState.running) {
+      closeScanModal();
     }
   });
 

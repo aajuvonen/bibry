@@ -126,3 +126,33 @@ def get_suppression(key, suggestion_id):
         return None
     value = suppressed.get(suggestion_id)
     return value if isinstance(value, dict) else None
+
+
+def clear_suppressions(phase_prefix=None):
+    data = load_metadata()
+    entries = data.setdefault("entries", {})
+    cleared = 0
+    for key, current in list(entries.items()):
+        if not isinstance(current, dict):
+            continue
+        suppressed = current.get("suppressed")
+        if not isinstance(suppressed, dict) or not suppressed:
+            continue
+        if not phase_prefix:
+            cleared += len(suppressed)
+            current["suppressed"] = {}
+            current["updated_at"] = _utc_now()
+            continue
+
+        kept = {}
+        for suggestion_id, payload in suppressed.items():
+            if str(suggestion_id).startswith(phase_prefix):
+                cleared += 1
+            else:
+                kept[suggestion_id] = payload
+        current["suppressed"] = kept
+        current["updated_at"] = _utc_now()
+
+    if cleared:
+        save_metadata(data)
+    return cleared
