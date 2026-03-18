@@ -52,6 +52,8 @@ XML_NS = {
     "arxiv": "http://arxiv.org/schemas/atom",
 }
 BOOK_LIKE_TYPES = {"book", "inbook", "incollection", "phdthesis", "mastersthesis", "thesis"}
+PDF_HIGH_PRIORITY_TYPES = {"article", "inproceedings", "conference", "phdthesis", "mastersthesis", "thesis", "techreport"}
+PDF_MEDIUM_PRIORITY_TYPES = {"book", "inbook", "incollection"}
 
 
 def _utc_now():
@@ -198,7 +200,10 @@ class CrossrefScanner:
         self.http = CachedHttpClient()
 
     def availability(self):
-        return {"available": True, "reason": ""}
+        return {
+            "available": True,
+            "reason": "Checks DOI or title/author/year matches, proposes BibLaTeX fixes, and flags retracted or withdrawn records.",
+        }
 
     def scan_entries(self, entries_by_key):
         actionable = []
@@ -591,7 +596,7 @@ class WorldCatScanner:
     def availability(self):
         return {
             "available": True,
-            "reason": "Uses public WorldCat catalog pages; official OCLC API credentials are not configured in this app.",
+            "reason": "Checks book-like entries by ISBN or title/author and proposes conservative book metadata improvements.",
         }
 
     def scan_entries(self, entries_by_key):
@@ -822,9 +827,103 @@ class WorldCatScanner:
         return writer.write(db)
 
 
+class PdfCoverageScanner:
+    service_name = "pdf-coverage"
+    display_name = "PDF Coverage"
+    phase_name = "phase3_pdf_coverage"
+
+    def availability(self):
+        return {"available": True, "reason": "Local scan only. Checks pdf/<citationKey>.pdf and BibLaTeX file/pdf fields."}
+
+    def scan_entries(self, entries_by_key):
+        items = []
+        counts = {"high": 0, "medium": 0, "low": 0}
+        for key, entry in entries_by_key.items():
+            item = self.scan_entry(entry)
+            if item is None:
+                continue
+            counts[item["priority"]] += 1
+            items.append(item)
+        return {"items": items, "counts": counts}
+
+    def scan_entry(self, entry):
+        key = entry.get("ID")
+        if not key:
+            return None
+
+        metadata = get_entry_metadata(key)
+        flags = metadata.get("flags", {}) if isinstance(metadata, dict) else {}
+        no_pdf_expected = isinstance(flags.get("no_pdf_expected"), dict) and flags.get("no_pdf_expected", {}).get("active")
+        has_pdf, source = self._has_pdf(entry)
+
+        provenance = {
+            "phase": self.phase_name,
+            "source": self.service_name,
+            "scanned_at": _utc_now(),
+            "matched": has_pdf,
+            "pdf_source": source,
+        }
+        set_entry_provenance(key, self.phase_name, provenance)
+
+        if has_pdf or no_pdf_expected:
+            return None
+
+        priority = self._priority(entry)
+        return {
+            "id": f"{self.phase_name}:{key}",
+            "phase": self.phase_name,
+            "service": self.service_name,
+            "key": key,
+            "title": _clean_text(entry.get("title")),
+            "type": (entry.get("ENTRYTYPE") or "").lower(),
+            "summary": " • ".join(filter(None, [
+                _clean_text(entry.get("author") or entry.get("editor")),
+                _clean_text(entry.get("year")),
+                (entry.get("ENTRYTYPE") or "").lower(),
+            ])),
+            "priority": priority,
+            "priority_label": priority.title(),
+            "reason": self._reason(entry, priority),
+            "expected_path": f"pdf/{key}.pdf",
+            "has_pdf": False,
+            "provenance": provenance,
+        }
+
+    def _has_pdf(self, entry):
+        key = entry.get("ID") or ""
+        if key and (bibstore.ROOT / "pdf" / f"{key}.pdf").exists():
+            return True, "path"
+
+        for field in ("pdf", "file"):
+            value = _clean_text(entry.get(field))
+            if not value:
+                continue
+            if ".pdf" in value.lower():
+                return True, field
+        return False, ""
+
+    def _priority(self, entry):
+        entry_type = (entry.get("ENTRYTYPE") or "").lower()
+        if entry_type in PDF_HIGH_PRIORITY_TYPES:
+            return "high"
+        if entry_type in PDF_MEDIUM_PRIORITY_TYPES:
+            return "medium"
+        return "low"
+
+    def _reason(self, entry, priority):
+        entry_type = (entry.get("ENTRYTYPE") or "").lower()
+        mapping = {
+            "high": f"{entry_type or 'entry'} is typically expected to have a local full-text PDF.",
+            "medium": f"{entry_type or 'entry'} may benefit from a local PDF, but coverage is less uniform.",
+            "low": f"{entry_type or 'entry'} often has no local PDF or may represent non-PDF material.",
+        }
+        return mapping.get(priority, mapping["low"])
+
+
 SCAN_SERVICES = {
     CrossrefScanner.service_name: CrossrefScanner(),
     WorldCatScanner.service_name: WorldCatScanner(),
+    PdfCoverageScanner.service_name: PdfCoverageScanner(),
 }
 
 

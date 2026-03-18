@@ -12,6 +12,8 @@ The project stays deliberately simple: no database, no accounts, no heavy fronte
 * Add, save, delete, copy, and undo entries
 * Import `.bib` files from the toolbar or by drag and drop
 * Preview import conflicts with entry-level diffs
+* Run Crossref and WorldCat metadata scans from a shared review workflow
+* Run a PDF coverage report with priority grouping and direct attach/suppress actions
 * Export selected entries to `export.bib`
 * Keep bounded per-file history with restore support
 * Switch between multiple `.bib` files in `bib/`
@@ -19,6 +21,32 @@ The project stays deliberately simple: no database, no accounts, no heavy fronte
 * Work reasonably well on mobile as well as desktop
 
 Import and export both pass the resulting bibliography through the sort/dedupe routine before writing or downloading it. Small toast notifications confirm actions such as save, add, import, export, undo, and restore.
+
+## Scan Workflows
+
+Bibry includes a `Scan` launcher in the toolbar. Scans never mutate the `.bib` file automatically. Every suggested change is reviewed first.
+
+### Crossref Scan
+
+The Crossref scan resolves entries by DOI first, then title/author/year. It proposes BibLaTeX amendments for core citation fields, highlights field-level diffs, and can flag retracted or withdrawn records. Each suggestion can be:
+
+* Accepted and applied directly
+* Loaded into the editor for manual adjustment
+* Rejected, optionally with suppression so it does not reappear unchanged
+
+### WorldCat Scan
+
+The WorldCat scan targets book-like entries such as books, in-collection items, and theses. It prefers ISBN matching and falls back to title/author lookup, then proposes conservative updates for fields such as ISBN, publisher, year, title, and edition using the same Accept / Edit / Reject review flow.
+
+### PDF Coverage Report
+
+The PDF coverage scan is a local analysis pass. It checks for PDFs via `pdf/<citationKey>.pdf` and explicit `file` / `pdf` fields, then groups missing coverage into:
+
+* High priority: articles, proceedings, theses, reports
+* Medium priority: books and in-collection material
+* Low priority: misc, online, software, datasets, multimedia, and similar items
+
+The report includes counts per category plus actions to open the entry, attach a PDF, or mark `No PDF Expected` so intentionally non-PDF items stay out of future scans.
 
 ## Data Layout
 

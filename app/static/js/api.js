@@ -71,6 +71,25 @@ export async function clearScanRejections(phase = "") {
   return await parseResponse(res);
 }
 
+export async function attachPdfToEntry(key, file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`/api/entry/${encodeURIComponent(key)}/pdf`, {
+    method: "POST",
+    body: formData,
+  });
+  return await parseResponse(res);
+}
+
+export async function markNoPdfExpected(key, enabled = true) {
+  const res = await fetch(`/api/entry/${encodeURIComponent(key)}/no-pdf-expected`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  return await parseResponse(res);
+}
+
 export async function fetchBibFiles() {
   const res = await fetch("/api/bibs");
   return await parseResponse(res);

@@ -1,11 +1,12 @@
 # app/api.py
 from flask import Blueprint, jsonify, request, abort, send_from_directory, Response
 import bibtexparser
+from pathlib import Path
 
 from . import bibstore
 from .enrichment import build_entries_by_key, get_scan_service, list_scan_services
 from .latex import latex_to_text
-from .metadata_store import clear_suppressions, get_entry_metadata, set_entry_provenance, set_suppression
+from .metadata_store import clear_suppressions, get_entry_metadata, set_entry_flag, set_entry_provenance, set_suppression
 from .sort_dedupe_bibtex import BibEntry, process_bibtex_text, split_entries
 
 api_bp = Blueprint('api', __name__)
@@ -434,14 +435,22 @@ def api_scan_run():
     if not availability.get("available"):
         abort(400, availability.get("reason") or "Scan service is unavailable")
 
-    actionable = scanner.scan_entries(build_entries_by_key())
+    result = scanner.scan_entries(build_entries_by_key())
+    if isinstance(result, dict):
+        actionable = result.get("items", [])
+        extra = {key: value for key, value in result.items() if key != "items"}
+    else:
+        actionable = result
+        extra = {}
     actionable.sort(key=lambda item: (item["key"] or "").lower())
-    return jsonify({
+    payload = {
         "service": service_name,
         "label": scanner.display_name,
         "phase": scanner.phase_name,
         "items": actionable,
-    })
+    }
+    payload.update(extra)
+    return jsonify(payload)
 
 
 @api_bp.route("/scan/review/apply", methods=["POST"])
@@ -501,3 +510,36 @@ def api_scan_clear_rejections():
     phase = request.json.get("phase") or ""
     cleared = clear_suppressions(phase_prefix=phase or None)
     return jsonify({"ok": True, "cleared": cleared})
+
+
+@api_bp.route("/entry/<key>/pdf", methods=["POST"])
+def api_attach_pdf(key):
+    upload = request.files.get("file")
+    if upload is None or upload.filename == "":
+        abort(400, "No PDF file provided")
+
+    filename = Path(upload.filename).name
+    if not filename.lower().endswith(".pdf"):
+        abort(400, "Only PDF files are supported")
+
+    db = bibstore.load_bib()
+    if not any(entry.get("ID") == key for entry in db.entries):
+        abort(404, "Entry not found")
+
+    PDF_DIR.mkdir(parents=True, exist_ok=True)
+    target = PDF_DIR / f"{key}.pdf"
+    upload.save(target)
+    set_entry_flag(key, "no_pdf_expected", False)
+    return jsonify({"ok": True, "key": key, "filename": target.name})
+
+
+@api_bp.route("/entry/<key>/no-pdf-expected", methods=["POST"])
+def api_mark_no_pdf_expected(key):
+    db = bibstore.load_bib()
+    if not any(entry.get("ID") == key for entry in db.entries):
+        abort(404, "Entry not found")
+
+    enabled = bool(request.json.get("enabled", True))
+    detail = {"label": "No PDF expected", "source": "user"}
+    set_entry_flag(key, "no_pdf_expected", enabled, detail if enabled else {})
+    return jsonify({"ok": True, "key": key, "enabled": enabled})

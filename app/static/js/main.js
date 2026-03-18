@@ -8,6 +8,8 @@ import {
   applyScanItem,
   rejectScanItem,
   clearScanRejections,
+  attachPdfToEntry,
+  markNoPdfExpected,
   fetchBibFiles,
   selectBibFile,
   undoLast,
@@ -38,6 +40,13 @@ let scanState = {
   running: false,
   currentService: "",
   statusText: "",
+};
+let pdfCoverageState = {
+  items: [],
+  filtered: [],
+  counts: { high: 0, medium: 0, low: 0 },
+  filter: "all",
+  sort: "priority",
 };
 let dragDepth = 0;
 let toastTimer = null;
@@ -582,6 +591,144 @@ function closeScanModal() {
   scanState.currentService = "";
   scanState.statusText = "";
   renderScanModal();
+}
+
+function pdfPriorityRank(priority) {
+  if (priority === "high") return 0;
+  if (priority === "medium") return 1;
+  return 2;
+}
+
+function applyPdfCoverageFilters() {
+  let items = [...pdfCoverageState.items];
+  if (pdfCoverageState.filter !== "all") {
+    items = items.filter((item) => item.priority === pdfCoverageState.filter);
+  }
+  if (pdfCoverageState.sort === "title") {
+    items.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+  } else if (pdfCoverageState.sort === "type") {
+    items.sort((a, b) => (a.type || "").localeCompare(b.type || ""));
+  } else {
+    items.sort((a, b) => {
+      const priorityDiff = pdfPriorityRank(a.priority) - pdfPriorityRank(b.priority);
+      if (priorityDiff) return priorityDiff;
+      return (a.key || "").localeCompare(b.key || "");
+    });
+  }
+  pdfCoverageState.filtered = items;
+}
+
+function renderPdfCoverageCounts() {
+  const countsEl = getEl("pdfCoverageCounts");
+  if (!countsEl) return;
+  const counts = pdfCoverageState.counts || { high: 0, medium: 0, low: 0 };
+  countsEl.innerHTML = `
+    <span class="badge text-bg-danger">High ${counts.high || 0}</span>
+    <span class="badge text-bg-warning">Medium ${counts.medium || 0}</span>
+    <span class="badge text-bg-secondary">Low ${counts.low || 0}</span>
+  `;
+}
+
+function renderPdfCoverageList() {
+  applyPdfCoverageFilters();
+  renderPdfCoverageCounts();
+
+  const list = getEl("pdfCoverageList");
+  if (!list) return;
+  list.innerHTML = "";
+
+  if (!pdfCoverageState.filtered.length) {
+    list.innerHTML = `<div class="text-muted small">No entries match the current PDF coverage filter.</div>`;
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const item of pdfCoverageState.filtered) {
+    const row = document.createElement("div");
+    row.className = `pdf-coverage-item pdf-priority-${item.priority}`;
+    row.innerHTML = `
+      <div class="pdf-coverage-main">
+        <div class="d-flex flex-wrap align-items-center gap-2">
+          <span class="picker-key">${escapeHtml(item.key || "(no key)")}</span>
+          <span class="badge text-bg-light picker-badge">${escapeHtml(item.priority_label || item.priority || "Low")}</span>
+          <span class="badge text-bg-light picker-badge">${escapeHtml(item.type || "misc")}</span>
+        </div>
+        <div class="fw-semibold">${escapeHtml(item.title || "(No title)")}</div>
+        <div class="picker-meta">${escapeHtml(item.summary || "")}</div>
+        <div class="small text-muted">${escapeHtml(item.reason || "")}</div>
+        <div class="small text-muted">Expected path: ${escapeHtml(item.expected_path || "")}</div>
+      </div>
+      <div class="pdf-coverage-actions">
+        <button class="btn btn-sm btn-outline-secondary" data-action="open">Open Entry</button>
+        <button class="btn btn-sm btn-primary" data-action="attach">Attach PDF</button>
+        <button class="btn btn-sm btn-outline-secondary" data-action="suppress">No PDF Expected</button>
+      </div>
+    `;
+
+    row.querySelector('[data-action="open"]')?.addEventListener("click", () => {
+      const entry = findEntryByKey(item.key);
+      if (entry) {
+        selectEntry(entry);
+      }
+      closePdfCoverageModal();
+    });
+
+    row.querySelector('[data-action="attach"]')?.addEventListener("click", () => {
+      const input = getEl("pdfUploadInput");
+      if (!input) return;
+      input.value = "";
+      input.dataset.entryKey = item.key || "";
+      input.click();
+    });
+
+    row.querySelector('[data-action="suppress"]')?.addEventListener("click", async () => {
+      try {
+        const res = await markNoPdfExpected(item.key, true);
+        if (!res.ok) {
+          throw new Error(res.description || res.error || "Failed to mark no PDF expected");
+        }
+        pdfCoverageState.items = pdfCoverageState.items.filter((candidate) => candidate.key !== item.key);
+        const counts = { high: 0, medium: 0, low: 0 };
+        for (const candidate of pdfCoverageState.items) {
+          counts[candidate.priority] = (counts[candidate.priority] || 0) + 1;
+        }
+        pdfCoverageState.counts = counts;
+        renderPdfCoverageList();
+        showToast(`Marked ${item.key} as no PDF expected`);
+      } catch (err) {
+        console.error("No PDF expected failed:", err);
+        alert(err.message || "Failed to update PDF expectation");
+      }
+    });
+
+    fragment.appendChild(row);
+  }
+  list.appendChild(fragment);
+}
+
+function openPdfCoverageModal(scanResult) {
+  pdfCoverageState.items = scanResult.items || [];
+  pdfCoverageState.counts = scanResult.counts || { high: 0, medium: 0, low: 0 };
+  pdfCoverageState.filter = "all";
+  pdfCoverageState.sort = "priority";
+
+  const backdrop = getEl("pdfCoverageBackdrop");
+  if (!backdrop) return;
+  backdrop.classList.add("open");
+  backdrop.setAttribute("aria-hidden", "false");
+
+  const filter = getEl("pdfCoverageFilter");
+  const sort = getEl("pdfCoverageSort");
+  if (filter) filter.value = "all";
+  if (sort) sort.value = "priority";
+  renderPdfCoverageList();
+}
+
+function closePdfCoverageModal() {
+  const backdrop = getEl("pdfCoverageBackdrop");
+  if (!backdrop) return;
+  backdrop.classList.remove("open");
+  backdrop.setAttribute("aria-hidden", "true");
 }
 
 async function loadScanServices() {
@@ -1210,6 +1357,11 @@ function buildBibFileItems(items) {
 }
 
 async function openScanReviewPicker(scanResult) {
+  if (scanResult.service === "pdf-coverage") {
+    openPdfCoverageModal(scanResult);
+    return;
+  }
+
   const items = buildScanReviewItems(scanResult.items || []);
   if (!items.length) {
     showToast(`No actionable ${scanResult.label || "scan"} updates found`);
@@ -1557,11 +1709,47 @@ function initUI() {
     });
   }
 
+  const pdfUploadInput = getEl("pdfUploadInput");
+  if (pdfUploadInput) {
+    pdfUploadInput.addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      const key = event.target.dataset.entryKey || "";
+      if (!file || !key) return;
+      try {
+        const res = await attachPdfToEntry(key, file);
+        if (!res.ok) {
+          throw new Error(res.description || res.error || "Failed to attach PDF");
+        }
+        pdfCoverageState.items = pdfCoverageState.items.filter((item) => item.key !== key);
+        const counts = { high: 0, medium: 0, low: 0 };
+        for (const candidate of pdfCoverageState.items) {
+          counts[candidate.priority] = (counts[candidate.priority] || 0) + 1;
+        }
+        pdfCoverageState.counts = counts;
+        renderPdfCoverageList();
+        await loadEntries();
+        showToast(`Attached PDF for ${key}`);
+      } catch (err) {
+        console.error("PDF attach failed:", err);
+        alert(err.message || "Failed to attach PDF");
+      } finally {
+        event.target.value = "";
+        event.target.dataset.entryKey = "";
+      }
+    });
+  }
+
   getEl("pickerCloseBtn")?.addEventListener("click", closePicker);
   getEl("scanCloseBtn")?.addEventListener("click", closeScanModal);
+  getEl("pdfCoverageCloseBtn")?.addEventListener("click", closePdfCoverageModal);
   getEl("scanBackdrop")?.addEventListener("click", (event) => {
     if (event.target === event.currentTarget && !scanState.running) {
       closeScanModal();
+    }
+  });
+  getEl("pdfCoverageBackdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) {
+      closePdfCoverageModal();
     }
   });
   getEl("scanClearRejectionsBtn")?.addEventListener("click", async () => {
@@ -1571,6 +1759,14 @@ function initUI() {
       console.error("Clear rejections failed:", err);
       alert(err.message || "Failed to clear past rejections");
     }
+  });
+  getEl("pdfCoverageFilter")?.addEventListener("change", (event) => {
+    pdfCoverageState.filter = event.target.value || "all";
+    renderPdfCoverageList();
+  });
+  getEl("pdfCoverageSort")?.addEventListener("change", (event) => {
+    pdfCoverageState.sort = event.target.value || "priority";
+    renderPdfCoverageList();
   });
   getEl("pickerBackdrop")?.addEventListener("click", (event) => {
     if (event.target === event.currentTarget) {
@@ -1629,6 +1825,10 @@ function initUI() {
     }
     if (event.key === "Escape" && getEl("scanBackdrop")?.classList.contains("open") && !scanState.running) {
       closeScanModal();
+      return;
+    }
+    if (event.key === "Escape" && getEl("pdfCoverageBackdrop")?.classList.contains("open")) {
+      closePdfCoverageModal();
     }
   });
 
