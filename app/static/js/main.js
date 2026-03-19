@@ -5,6 +5,9 @@ import {
   fetchEntries,
   fetchScanServices,
   runScan,
+  startScanJob,
+  fetchScanJob,
+  cancelScanJob,
   applyScanItem,
   rejectScanItem,
   clearScanRejections,
@@ -39,7 +42,16 @@ let scanState = {
   services: [],
   running: false,
   currentService: "",
+  currentLabel: "",
   statusText: "",
+  progressText: "",
+  jobId: "",
+  cursor: 0,
+  actionableCount: 0,
+  total: 0,
+  scanned: 0,
+  items: [],
+  pollTimer: null,
 };
 let pdfCoverageState = {
   items: [],
@@ -137,6 +149,25 @@ function showToast(message) {
   }, 1800);
 }
 
+function refreshScanToolbarButton() {
+  const button = getEl("scanToolbarBtn");
+  if (!button) return;
+  if (scanState.running) {
+    button.innerHTML = `<i class="fa fa-refresh scan-rotating me-1" aria-hidden="true"></i>Scan`;
+  } else {
+    button.textContent = "Scan";
+  }
+}
+
+function setScanEditLock(locked) {
+  const editorEl = getEl("editRaw");
+  if (editorEl) editorEl.readOnly = locked;
+  ["saveBtn", "addBtn", "cancelBtn"].forEach((id) => {
+    const button = getEl(id);
+    if (button) button.disabled = locked;
+  });
+}
+
 function filteredPickerItems() {
   if (!pickerState) return [];
   const query = pickerState.query.trim().toLowerCase();
@@ -182,6 +213,14 @@ function updatePickerPreview() {
 
   if (pickerState.previewRenderer) {
     previewText.innerHTML = pickerState.previewRenderer(selectedItem);
+    if (pickerState.mode === "quality-scan") {
+      const textarea = previewText.querySelector("[data-role='proposed-raw']");
+      if (textarea) {
+        textarea.addEventListener("input", (event) => {
+          selectedItem.proposed_raw = event.target.value || "";
+        });
+      }
+    }
     return;
   }
 
@@ -359,7 +398,7 @@ function renderQualityPreview(item) {
       </div>
       <div>
         <div class="small text-muted mb-1">Proposed</div>
-        <pre>${escapeHtml(item.proposed_raw || "")}</pre>
+        <textarea class="form-control form-control-sm scan-proposed-textarea" data-role="proposed-raw">${escapeHtml(item.proposed_raw || "")}</textarea>
       </div>
     </div>
   `;
@@ -531,9 +570,12 @@ function renderScanModal() {
   const backdrop = getEl("scanBackdrop");
   const list = getEl("scanServiceList");
   const status = getEl("scanStatus");
+  const progress = getEl("scanProgress");
   const clearBtn = getEl("scanClearRejectionsBtn");
+  const stopBtn = getEl("scanStopBtn");
+  const openResultsBtn = getEl("scanOpenResultsBtn");
   const closeBtn = getEl("scanCloseBtn");
-  if (!backdrop || !list || !status || !clearBtn || !closeBtn) return;
+  if (!backdrop || !list || !status || !progress || !clearBtn || !stopBtn || !openResultsBtn || !closeBtn) return;
 
   list.innerHTML = "";
   const fragment = document.createDocumentFragment();
@@ -553,9 +595,13 @@ function renderScanModal() {
     button.textContent = scanState.running && scanState.currentService === service.name
       ? "Scan underway..."
       : `Run ${service.label || service.name}`;
-    button.disabled = scanState.running || service.available === false;
+    button.disabled = (scanState.running && service.name !== scanState.currentService) || service.available === false;
     button.addEventListener("click", async () => {
       try {
+        if (scanState.running && scanState.currentService === service.name) {
+          openCurrentScanResults();
+          return;
+        }
         await startScanFromModal(service);
       } catch (err) {
         console.error("Scan failed:", err);
@@ -570,8 +616,11 @@ function renderScanModal() {
   list.appendChild(fragment);
 
   status.textContent = scanState.statusText || "Choose a scan source.";
-  clearBtn.disabled = scanState.running;
-  closeBtn.disabled = scanState.running;
+  progress.textContent = scanState.progressText || "";
+  clearBtn.disabled = false;
+  stopBtn.disabled = !scanState.running;
+  openResultsBtn.disabled = !scanState.items.length;
+  closeBtn.disabled = false;
 }
 
 function openScanModal() {
@@ -587,10 +636,6 @@ function closeScanModal() {
   if (!backdrop) return;
   backdrop.classList.remove("open");
   backdrop.setAttribute("aria-hidden", "true");
-  scanState.running = false;
-  scanState.currentService = "";
-  scanState.statusText = "";
-  renderScanModal();
 }
 
 function pdfPriorityRank(priority) {
@@ -1368,6 +1413,20 @@ async function openScanReviewPicker(scanResult) {
     return;
   }
 
+  if (pickerState?.mode === "quality-scan") {
+    const existingIds = new Set(pickerState.items.map((item) => item.id));
+    const additions = items.filter((item) => !existingIds.has(item.id));
+    if (additions.length) {
+      const hasSelected = pickerState.items.some((item) => item.selected);
+      additions.forEach((item, index) => {
+        item.selected = !hasSelected && index === 0;
+      });
+      pickerState.items.push(...additions);
+      renderPickerList();
+    }
+    return;
+  }
+
   openPicker({
     mode: "quality-scan",
     title: `${scanResult.label || "Scan"} Review`,
@@ -1437,29 +1496,111 @@ async function openScanReviewPicker(scanResult) {
 }
 
 async function startScanFromModal(service) {
-  scanState.running = true;
-  scanState.currentService = service.name;
-  scanState.statusText = `${service.label || service.name} scan underway... this can take a while.`;
-  renderScanModal();
-
-  try {
+  if (service.name === "pdf-coverage") {
     const res = await runScan(service.name);
     if (!res.ok) {
       throw new Error(res.description || res.error || "Scan failed");
     }
-    scanState.running = false;
-    scanState.currentService = "";
-    scanState.statusText = `${service.label || service.name} scan finished.`;
-    renderScanModal();
-    closeScanModal();
     await openScanReviewPicker(res);
-  } catch (err) {
-    scanState.running = false;
-    scanState.currentService = "";
-    scanState.statusText = err.message || "Scan failed";
-    renderScanModal();
-    throw err;
+    return;
   }
+
+  const job = await startScanJob(service.name);
+  if (!job.ok && job.status !== 202) {
+    throw new Error(job.description || job.error || "Failed to start scan");
+  }
+
+  scanState.running = true;
+  scanState.currentService = service.name;
+  scanState.currentLabel = service.label || service.name;
+  scanState.jobId = job.id;
+  scanState.cursor = 0;
+  scanState.items = [];
+  scanState.actionableCount = 0;
+  scanState.total = job.total || 0;
+  scanState.scanned = 0;
+  scanState.statusText = `${scanState.currentLabel} scan underway...`;
+  scanState.progressText = `0 / ${scanState.total || 0} scanned`;
+  setScanEditLock(true);
+  refreshScanToolbarButton();
+  renderScanModal();
+  scheduleScanPoll();
+}
+
+function scheduleScanPoll() {
+  if (!scanState.running || !scanState.jobId) return;
+  window.clearTimeout(scanState.pollTimer);
+  scanState.pollTimer = window.setTimeout(async () => {
+    try {
+      const res = await fetchScanJob(scanState.jobId, scanState.cursor);
+      if (!res.ok) {
+        throw new Error(res.description || res.error || "Failed to poll scan status");
+      }
+
+      scanState.cursor = res.cursor || scanState.cursor;
+      scanState.scanned = res.scanned || 0;
+      scanState.total = res.total || 0;
+      scanState.actionableCount = res.actionable_count || 0;
+      scanState.statusText = res.message || scanState.statusText;
+      scanState.progressText = `${scanState.scanned} / ${scanState.total || 0} scanned • ${scanState.actionableCount} actionable`;
+
+      if (Array.isArray(res.items) && res.items.length) {
+        scanState.items.push(...res.items);
+        await openScanReviewPicker({
+          service: scanState.currentService,
+          label: scanState.currentLabel,
+          items: res.items,
+        });
+      }
+
+      if (res.status === "running") {
+        renderScanModal();
+        scheduleScanPoll();
+        return;
+      }
+
+      scanState.running = false;
+      setScanEditLock(false);
+      refreshScanToolbarButton();
+      renderScanModal();
+      if (res.status === "completed") {
+        showToast(`${scanState.currentLabel} scan finished`);
+      } else if (res.status === "cancelled") {
+        showToast(`${scanState.currentLabel} scan stopped`);
+      } else if (res.status === "failed") {
+        alert(res.message || "Scan failed");
+      }
+    } catch (err) {
+      scanState.running = false;
+      scanState.statusText = err.message || "Scan failed";
+      setScanEditLock(false);
+      refreshScanToolbarButton();
+      renderScanModal();
+      alert(err.message || "Scan failed");
+    }
+  }, 1000);
+}
+
+async function stopCurrentScan() {
+  if (!scanState.running || !scanState.jobId) return;
+  const res = await cancelScanJob(scanState.jobId);
+  if (!res.ok) {
+    throw new Error(res.description || res.error || "Failed to stop scan");
+  }
+  scanState.statusText = "Stopping scan...";
+  renderScanModal();
+}
+
+function openCurrentScanResults() {
+  if (!scanState.items.length) {
+    showToast("No scan results are ready yet");
+    return;
+  }
+  openScanReviewPicker({
+    service: scanState.currentService,
+    label: scanState.currentLabel,
+    items: scanState.items,
+  });
 }
 
 async function handleClearScanRejections() {
@@ -1618,6 +1759,8 @@ function initUI() {
   grid = getEl("grid");
   editor = getEl("editRaw");
   searchInput = getEl("search");
+  refreshScanToolbarButton();
+  setScanEditLock(false);
 
   const sortBtns = document.querySelectorAll(".sort-btn");
   if (sortBtns && sortBtns.length) {
@@ -1741,9 +1884,20 @@ function initUI() {
 
   getEl("pickerCloseBtn")?.addEventListener("click", closePicker);
   getEl("scanCloseBtn")?.addEventListener("click", closeScanModal);
+  getEl("scanStopBtn")?.addEventListener("click", async () => {
+    try {
+      await stopCurrentScan();
+    } catch (err) {
+      console.error("Stop scan failed:", err);
+      alert(err.message || "Failed to stop scan");
+    }
+  });
+  getEl("scanOpenResultsBtn")?.addEventListener("click", () => {
+    openCurrentScanResults();
+  });
   getEl("pdfCoverageCloseBtn")?.addEventListener("click", closePdfCoverageModal);
   getEl("scanBackdrop")?.addEventListener("click", (event) => {
-    if (event.target === event.currentTarget && !scanState.running) {
+    if (event.target === event.currentTarget) {
       closeScanModal();
     }
   });
@@ -1823,7 +1977,7 @@ function initUI() {
       closePicker();
       return;
     }
-    if (event.key === "Escape" && getEl("scanBackdrop")?.classList.contains("open") && !scanState.running) {
+    if (event.key === "Escape" && getEl("scanBackdrop")?.classList.contains("open")) {
       closeScanModal();
       return;
     }

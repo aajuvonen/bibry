@@ -7,6 +7,7 @@ from . import bibstore
 from .enrichment import build_entries_by_key, get_scan_service, list_scan_services
 from .latex import latex_to_text
 from .metadata_store import clear_suppressions, get_entry_metadata, set_entry_flag, set_entry_provenance, set_suppression
+from .scan_jobs import cancel_scan_job, get_scan_job, start_scan_job
 from .sort_dedupe_bibtex import BibEntry, process_bibtex_text, split_entries
 
 api_bp = Blueprint('api', __name__)
@@ -451,6 +452,43 @@ def api_scan_run():
     }
     payload.update(extra)
     return jsonify(payload)
+
+
+@api_bp.route("/scan/jobs", methods=["POST"])
+def api_scan_jobs_start():
+    service_name = request.json.get("service", "")
+    scanner = get_scan_service(service_name)
+    if scanner is None:
+        abort(404, "Unknown scan service")
+    if service_name not in {"crossref", "worldcat"}:
+        abort(400, "Background jobs are only supported for Crossref and WorldCat scans")
+    availability = scanner.availability()
+    if not availability.get("available"):
+        abort(400, availability.get("reason") or "Scan service is unavailable")
+    try:
+        job = start_scan_job(service_name)
+    except RuntimeError as exc:
+        abort(409, str(exc))
+    except LookupError as exc:
+        abort(404, str(exc))
+    return jsonify(job), 202
+
+
+@api_bp.route("/scan/jobs/<job_id>")
+def api_scan_job_status(job_id):
+    cursor = request.args.get("cursor", "0")
+    job = get_scan_job(job_id, cursor=cursor)
+    if job is None:
+        abort(404, "Scan job not found")
+    return jsonify(job)
+
+
+@api_bp.route("/scan/jobs/<job_id>/cancel", methods=["POST"])
+def api_scan_job_cancel(job_id):
+    job = cancel_scan_job(job_id)
+    if job is None:
+        abort(404, "Scan job not found")
+    return jsonify({"ok": True, "id": job_id})
 
 
 @api_bp.route("/scan/review/apply", methods=["POST"])

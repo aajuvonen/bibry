@@ -33,6 +33,27 @@ export async function runScan(service) {
   return await parseResponse(res);
 }
 
+export async function startScanJob(service) {
+  const res = await fetch("/api/scan/jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ service }),
+  });
+  return await parseResponse(res);
+}
+
+export async function fetchScanJob(jobId, cursor = 0) {
+  const res = await fetch(`/api/scan/jobs/${encodeURIComponent(jobId)}?cursor=${encodeURIComponent(cursor)}`);
+  return await parseResponse(res);
+}
+
+export async function cancelScanJob(jobId) {
+  const res = await fetch(`/api/scan/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST",
+  });
+  return await parseResponse(res);
+}
+
 export async function applyScanItem(item) {
   const res = await fetch("/api/scan/review/apply", {
     method: "POST",
