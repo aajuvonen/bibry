@@ -249,7 +249,6 @@ def _render_export_html(entries, view_mode="list"):
                 <span class="text-muted small me-1"><i class="fa fa-file-text" aria-hidden="true"></i></span>
                 <span>{head}.</span>
                 {list_actions(action_items)}
-                <div class="picker-key mt-1">{key}</div>
               </div>
             """)
     container = f"<div class='cards'>{''.join(items)}</div>" if view_mode == "cards" else f"<div class='list'>{''.join(items)}</div>"
