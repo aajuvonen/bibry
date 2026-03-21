@@ -393,11 +393,11 @@ function renderQualityPreview(item) {
     <div class="history-change-fields mb-3">${fieldsHtml}</div>
     <div class="scan-preview-raw">
       <div>
-        <div class="small text-muted mb-1">Current</div>
-        <pre>${escapeHtml(item.current_raw || "")}</pre>
+        <div class="small text-muted mb-1">Current entry (read-only)</div>
+        <pre class="scan-current-raw">${escapeHtml(item.current_raw || "")}</pre>
       </div>
       <div>
-        <div class="small text-muted mb-1">Proposed</div>
+        <div class="small text-muted mb-1">Proposed entry (editable before accept)</div>
         <textarea class="form-control form-control-sm scan-proposed-textarea" data-role="proposed-raw">${escapeHtml(item.proposed_raw || "")}</textarea>
       </div>
     </div>
@@ -1422,7 +1422,12 @@ async function openScanReviewPicker(scanResult) {
         item.selected = !hasSelected && index === 0;
       });
       pickerState.items.push(...additions);
-      renderPickerList();
+      const activePreviewEditor = document.activeElement?.matches?.("[data-role='proposed-raw']");
+      if (!activePreviewEditor) {
+        renderPickerList();
+      } else {
+        updatePickerInfo();
+      }
     }
     return;
   }

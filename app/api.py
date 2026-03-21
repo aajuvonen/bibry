@@ -16,6 +16,7 @@ api_bp = Blueprint('api', __name__)
 PDF_DIR = bibstore.ROOT / "pdf"
 _ENTRY_CACHE_SIGNATURE = object()
 _ENTRY_CACHE_BASE = None
+_RAW_DISPLAY_FIELDS = {"url", "doi", "eprint", "file", "pdf"}
 
 
 def _build_entry_cache():
@@ -33,7 +34,7 @@ def _build_entry_cache():
         db2.entries = [e]
         raw = writer.write(db2)
         fields = {
-            k: latex_to_text(v) if isinstance(v, str) else v
+            k: (v if k.lower() in _RAW_DISPLAY_FIELDS else latex_to_text(v)) if isinstance(v, str) else v
             for k, v in e.items()
         }
         cached.append({
@@ -85,14 +86,14 @@ def _entry_preview(raw):
 
 
 def _entry_signature(entry):
-    return (
-        (entry.get("ENTRYTYPE") or "").lower(),
-        tuple(sorted(
-            (key, value.strip())
-            for key, value in entry.items()
+    return {
+        "type": (entry.get("ENTRYTYPE") or "").lower(),
+        "fields": {
+            key: value.strip()
+            for key, value in sorted(entry.items())
             if key not in {"ID", "ENTRYTYPE"} and isinstance(value, str)
-        )),
-    )
+        },
+    }
 
 
 def _entry_conflict(existing_entry, incoming_entry):
