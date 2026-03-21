@@ -1,6 +1,15 @@
 // static/js/api.js
 // Handles AJAX calls to the Flask API
 
+function stripHtml(text = "") {
+  return String(text)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 async function parseResponse(res) {
   const text = await res.text();
   let data = {};
@@ -8,7 +17,8 @@ async function parseResponse(res) {
     try {
       data = JSON.parse(text);
     } catch {
-      data = { error: text };
+      const stripped = stripHtml(text);
+      data = { error: stripped || text };
     }
   }
   return { ok: res.ok, status: res.status, ...data };
@@ -154,17 +164,21 @@ export async function importEntries(entries) {
   return await parseResponse(res);
 }
 
-export async function exportEntries(keys) {
+export async function exportEntries(keys, options = {}) {
   const res = await fetch("/api/export", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ keys }),
+    body: JSON.stringify({
+      keys,
+      format: options.format || "bib",
+      html_view: options.htmlView || "list",
+    }),
   });
   const blob = await res.blob();
   const exportedCount = Number(res.headers.get("X-Bibry-Exported-Count") || "0");
   let error = "";
   if (!res.ok) {
-    error = await blob.text();
+    error = stripHtml(await blob.text());
   }
   return { ok: res.ok, status: res.status, blob, exportedCount, error };
 }

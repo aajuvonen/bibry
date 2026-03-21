@@ -60,6 +60,11 @@ let pdfCoverageState = {
   filter: "all",
   sort: "priority",
 };
+let exportState = {
+  format: "bib",
+  htmlView: "list",
+};
+let dialogResolver = null;
 let dragDepth = 0;
 let toastTimer = null;
 let lastSelectedCardKey = null;
@@ -168,6 +173,72 @@ function setScanEditLock(locked) {
   });
 }
 
+function closeDialog(result = null) {
+  const backdrop = getEl("dialogBackdrop");
+  if (!backdrop) return;
+  backdrop.classList.remove("open");
+  backdrop.setAttribute("aria-hidden", "true");
+  const resolver = dialogResolver;
+  dialogResolver = null;
+  if (resolver) resolver(result);
+}
+
+function showDialog({ title, body, actions }) {
+  return new Promise((resolve) => {
+    dialogResolver = resolve;
+    const backdrop = getEl("dialogBackdrop");
+    const titleEl = getEl("dialogTitle");
+    const bodyEl = getEl("dialogBody");
+    const actionsEl = getEl("dialogActions");
+    if (!backdrop || !titleEl || !bodyEl || !actionsEl) {
+      resolve(null);
+      return;
+    }
+    titleEl.textContent = title || "Message";
+    bodyEl.textContent = body || "";
+    actionsEl.innerHTML = "";
+    (actions || [{ label: "Close", value: true, className: "btn btn-sm btn-primary" }]).forEach((action) => {
+      const button = document.createElement("button");
+      button.className = action.className || "btn btn-sm btn-outline-secondary";
+      button.textContent = action.label;
+      button.addEventListener("click", () => closeDialog(action.value));
+      actionsEl.appendChild(button);
+    });
+    backdrop.classList.add("open");
+    backdrop.setAttribute("aria-hidden", "false");
+  });
+}
+
+function showMessageDialog(title, body) {
+  return showDialog({
+    title,
+    body,
+    actions: [{ label: "Close", value: true, className: "btn btn-sm btn-primary" }],
+  });
+}
+
+function showConfirmDialog(title, body, confirmLabel = "Confirm", confirmVariant = "btn-danger") {
+  return showDialog({
+    title,
+    body,
+    actions: [
+      { label: "Cancel", value: false, className: "btn btn-sm btn-outline-secondary" },
+      { label: confirmLabel, value: true, className: `btn btn-sm ${confirmVariant}` },
+    ],
+  });
+}
+
+function formatUiError(err, fallback = "Action failed") {
+  if (!err) return fallback;
+  const message = String(err.message || err || fallback)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return message || fallback;
+}
+
 function filteredPickerItems() {
   if (!pickerState) return [];
   const query = pickerState.query.trim().toLowerCase();
@@ -180,6 +251,10 @@ function updatePickerInfo() {
   const info = getEl("pickerSelectionInfo");
   if (!info) return;
   const selectedCount = pickerState.items.filter((item) => item.selected).length;
+  if (pickerState.mode === "export") {
+    pickerState.statusLine = exportStatusLine();
+    renderPickerExtras();
+  }
   if (pickerState.singleSelect) {
     info.textContent = selectedCount ? "1 selected" : "No selection";
     return;
@@ -530,7 +605,7 @@ function renderPickerActions() {
     button.addEventListener("click", async () => {
       const selectedItem = getSelectedPickerItem();
       if (action.requiresSelection !== false && !selectedItem) {
-        alert("Select an entry.");
+        await showMessageDialog("Selection Required", "Select an entry first.");
         return;
       }
 
@@ -539,12 +614,77 @@ function renderPickerActions() {
         await action.onClick(selectedItem);
       } catch (err) {
         console.error(`${pickerState?.mode || "picker"} action failed:`, err);
-        alert(err.message || "Action failed");
+        await showMessageDialog("Action Failed", formatUiError(err));
       } finally {
         button.disabled = false;
       }
     });
     actions.appendChild(button);
+  });
+}
+
+function renderPickerExtras() {
+  const extra = getEl("pickerExtraActions");
+  const statusLine = getEl("pickerStatusLine");
+  const search = getEl("pickerSearch");
+  const selectVisibleBtn = getEl("pickerSelectVisibleBtn");
+  const clearBtn = getEl("pickerClearBtn");
+  if (!extra || !statusLine) return;
+  extra.innerHTML = "";
+  statusLine.textContent = pickerState?.statusLine || "";
+  if (!pickerState?.extraActions?.length) {
+    if (search) search.style.display = "";
+    if (selectVisibleBtn) selectVisibleBtn.style.display = pickerState?.singleSelect ? "none" : "";
+    if (clearBtn) clearBtn.style.display = "";
+    return;
+  }
+
+  if (search) search.style.display = "";
+  if (selectVisibleBtn) selectVisibleBtn.style.display = pickerState.singleSelect ? "none" : "";
+  if (clearBtn) clearBtn.style.display = "";
+
+  pickerState.extraActions.forEach((action) => {
+    if (action.type === "buttonGroup" && Array.isArray(action.options)) {
+      const group = document.createElement("div");
+      group.className = action.className || "btn-group btn-group-sm";
+      group.setAttribute("role", "group");
+      action.options.forEach((option) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `btn btn-sm ${option.value === action.value ? "btn-primary active" : "btn-outline-secondary"}`;
+        button.textContent = option.label;
+        button.disabled = Boolean(action.disabled);
+        button.addEventListener("click", () => action.onChange?.(option.value));
+        group.appendChild(button);
+      });
+      extra.appendChild(group);
+      return;
+    }
+
+    const button = document.createElement(action.tagName || "button");
+    button.className = action.className || "btn btn-sm btn-outline-secondary";
+    if (action.tagName === "select" && Array.isArray(action.options)) {
+      action.options.forEach((option) => {
+        const node = document.createElement("option");
+        node.value = option.value;
+        node.textContent = option.label;
+        if (option.value === action.value) node.selected = true;
+        button.appendChild(node);
+      });
+      button.addEventListener("change", (event) => action.onChange?.(event.target.value));
+    } else {
+      button.textContent = action.label;
+      button.disabled = Boolean(action.disabled);
+      button.addEventListener("click", async () => {
+        try {
+          await action.onClick?.();
+        } catch (err) {
+          console.error("Picker extra action failed:", err);
+          await showMessageDialog("Action Failed", err.message || "Action failed");
+        }
+      });
+    }
+    extra.appendChild(button);
   });
 }
 
@@ -563,79 +703,88 @@ function closePicker() {
   if (actions) {
     actions.querySelectorAll(".picker-action-custom").forEach((node) => node.remove());
   }
+  const extra = getEl("pickerExtraActions");
+  if (extra) extra.innerHTML = "";
+  const statusLine = getEl("pickerStatusLine");
+  if (statusLine) statusLine.textContent = "";
   updatePickerPreview();
 }
 
-function renderScanModal() {
-  const backdrop = getEl("scanBackdrop");
-  const list = getEl("scanServiceList");
-  const status = getEl("scanStatus");
-  const progress = getEl("scanProgress");
-  const clearBtn = getEl("scanClearRejectionsBtn");
-  const stopBtn = getEl("scanStopBtn");
-  const openResultsBtn = getEl("scanOpenResultsBtn");
-  const closeBtn = getEl("scanCloseBtn");
-  if (!backdrop || !list || !status || !progress || !clearBtn || !stopBtn || !openResultsBtn || !closeBtn) return;
-
-  list.innerHTML = "";
-  const fragment = document.createDocumentFragment();
-  for (const service of scanState.services) {
-    const row = document.createElement("div");
-    row.className = "scan-service";
-
-    const info = document.createElement("div");
-    info.className = "scan-service-info";
-    info.innerHTML = `
-      <div class="fw-semibold">${escapeHtml(service.label || service.name)}</div>
-      <div class="small text-muted">${escapeHtml(service.reason || "")}</div>
-    `;
-
-    const button = document.createElement("button");
-    button.className = "btn btn-sm btn-primary";
-    button.textContent = scanState.running && scanState.currentService === service.name
-      ? "Scan underway..."
-      : `Run ${service.label || service.name}`;
-    button.disabled = (scanState.running && service.name !== scanState.currentService) || service.available === false;
-    button.addEventListener("click", async () => {
-      try {
-        if (scanState.running && scanState.currentService === service.name) {
-          openCurrentScanResults();
-          return;
-        }
-        await startScanFromModal(service);
-      } catch (err) {
-        console.error("Scan failed:", err);
-        alert(err.message || "Scan failed");
-      }
-    });
-
-    row.appendChild(info);
-    row.appendChild(button);
-    fragment.appendChild(row);
+function scanStatusLine() {
+  if (scanState.running) {
+    return `${scanState.statusText}${scanState.actionableCount ? ` • ${scanState.actionableCount} actionable` : ""}`;
   }
-  list.appendChild(fragment);
-
-  status.textContent = scanState.statusText || "Choose a scan source.";
-  progress.textContent = scanState.progressText || "";
-  clearBtn.disabled = false;
-  stopBtn.disabled = !scanState.running;
-  openResultsBtn.disabled = !scanState.items.length;
-  closeBtn.disabled = false;
+  if (scanState.currentLabel && scanState.items.length) {
+    return `${scanState.currentLabel} ready • ${scanState.items.length} actionable`;
+  }
+  return "Choose Crossref or WorldCat to start a rolling scan. PDF Coverage opens a separate report.";
 }
 
-function openScanModal() {
-  const backdrop = getEl("scanBackdrop");
-  if (!backdrop) return;
-  backdrop.classList.add("open");
-  backdrop.setAttribute("aria-hidden", "false");
-  renderScanModal();
+function scanExtraActions() {
+  const actions = scanState.services
+    .filter((service) => service.name !== "pdf-coverage")
+    .map((service) => ({
+      label: scanState.running && scanState.currentService === service.name ? `${service.label} Running` : `Run ${service.label}`,
+      className: "btn btn-sm btn-outline-primary",
+      disabled: scanState.running && scanState.currentService !== service.name,
+      onClick: async () => {
+        if (!scanState.running || scanState.currentService !== service.name) {
+          await startScanFromModal(service);
+        }
+      },
+    }));
+  const pdfCoverageService = scanState.services.find((service) => service.name === "pdf-coverage");
+  if (pdfCoverageService) {
+    actions.push({
+      label: pdfCoverageService.label || "PDF Coverage",
+      className: "btn btn-sm btn-outline-secondary",
+      disabled: scanState.running,
+      onClick: async () => {
+        await startScanFromModal(pdfCoverageService);
+      },
+    });
+  }
+  actions.push({
+    label: "Stop",
+    className: "btn btn-sm btn-outline-danger",
+    disabled: !scanState.running,
+    onClick: async () => {
+      await stopCurrentScan();
+    },
+  });
+  actions.push({
+    label: "Clear Rejections",
+    className: "btn btn-sm btn-outline-secondary",
+    onClick: async () => {
+      await handleClearScanRejections();
+    },
+  });
+  return actions;
 }
 
-function closeScanModal() {
-  const backdrop = getEl("scanBackdrop");
-  if (!backdrop) return;
-  backdrop.classList.remove("open");
-  backdrop.setAttribute("aria-hidden", "true");
+function ensureScanWorkspaceOpen() {
+  if (pickerState?.mode === "quality-scan") {
+    pickerState.extraActions = scanExtraActions();
+    pickerState.statusLine = scanStatusLine();
+    renderPickerExtras();
+    return;
+  }
+  openPicker({
+    mode: "quality-scan",
+    title: "Scan Review",
+    subtitle: "Rolling review queue for Crossref and WorldCat suggestions.",
+    confirmText: "Apply",
+    emptyMessage: "No actionable entries yet. Start a scan to populate the queue.",
+    items: buildScanReviewItems(scanState.items),
+    singleSelect: true,
+    showPreview: true,
+    previewLabel: "Proposed amendment",
+    previewEmptyText: "Select a scanned entry to review differences.",
+    previewRenderer: renderQualityPreview,
+    extraActions: scanExtraActions(),
+    statusLine: scanStatusLine(),
+    actions: scanReviewActions(),
+  });
 }
 
 function pdfPriorityRank(priority) {
@@ -742,7 +891,7 @@ function renderPdfCoverageList() {
         showToast(`Marked ${item.key} as no PDF expected`);
       } catch (err) {
         console.error("No PDF expected failed:", err);
-        alert(err.message || "Failed to update PDF expectation");
+        await showMessageDialog("Update Failed", formatUiError(err, "Failed to update PDF expectation"));
       }
     });
 
@@ -782,7 +931,6 @@ async function loadScanServices() {
     throw new Error(res.description || res.error || "Failed to load scan services");
   }
   scanState.services = res.items || [];
-  renderScanModal();
 }
 
 function openPicker(config) {
@@ -801,6 +949,8 @@ function openPicker(config) {
     previewEmptyText: config.previewEmptyText || "",
     previewRenderer: config.previewRenderer || null,
     actions: config.actions || [],
+    extraActions: config.extraActions || [],
+    statusLine: config.statusLine || "",
   };
 
   const backdrop = getEl("pickerBackdrop");
@@ -828,6 +978,7 @@ function openPicker(config) {
 
   renderPickerList();
   renderPickerActions();
+  renderPickerExtras();
 }
 
 function getSortField() {
@@ -1152,7 +1303,8 @@ async function saveEntry() {
     const previousKey = currentEntry.key;
     const raw = editor ? editor.value.trim() : "";
     if (raw === "") {
-      if (!confirm("Delete this entry?")) return;
+      const confirmed = await showConfirmDialog("Delete Entry", "Delete this entry?", "Delete", "btn-danger");
+      if (!confirmed) return;
     }
 
     const res = await fetch(`/api/entry/${currentEntry.key}`, {
@@ -1180,7 +1332,7 @@ async function saveEntry() {
     }
   } catch (err) {
     console.error("Save failed:", err);
-    alert(err.message || "Failed to save entry");
+    await showMessageDialog("Save Failed", formatUiError(err, "Failed to save entry"));
   }
 }
 
@@ -1192,7 +1344,7 @@ async function addEntry() {
   try {
     const raw = editor ? editor.value.trim() : "";
     if (!raw) {
-      alert("No entry content");
+      await showMessageDialog("Nothing To Add", "Enter BibLaTeX for the new entry first.");
       return;
     }
 
@@ -1214,7 +1366,7 @@ async function addEntry() {
     showToast(`Added ${data.key}`);
   } catch (err) {
     console.error("Add failed:", err);
-    alert(err.message || "Failed to add entry");
+    await showMessageDialog("Add Failed", formatUiError(err, "Failed to add entry"));
   }
 }
 
@@ -1235,7 +1387,7 @@ async function handleUndo() {
     throw new Error((res && (res.description || res.error)) || "Undo failed");
   } catch (err) {
     console.error("Undo failed:", err);
-    alert(err.message || "Undo failed");
+    await showMessageDialog("Undo Failed", formatUiError(err, "Undo failed"));
   }
 }
 
@@ -1328,6 +1480,7 @@ function buildExportItems() {
       entry.type || "",
     ]),
     raw: entry.raw || "",
+    hasPdf: Boolean(entry.has_pdf),
     selected: false,
     badge: "",
     searchText: [
@@ -1401,6 +1554,69 @@ function buildBibFileItems(items) {
   }));
 }
 
+function scanReviewActions() {
+  return [
+    {
+      label: "Accept",
+      className: "btn btn-sm btn-primary",
+      onClick: async (selected) => {
+        const applyRes = await applyScanItem(selected);
+        if (!applyRes.ok) {
+          throw new Error(applyRes.description || applyRes.error || "Failed to apply patch");
+        }
+        await loadEntries();
+        currentEntry = findEntryByKey(applyRes.key || selected.key);
+        if (currentEntry && editor) {
+          editor.value = currentEntry.raw || "";
+        }
+        removePickerItem(selected.id);
+        scanState.items = scanState.items.filter((item) => item.id !== selected.id);
+        showToast(`Applied scan patch for ${applyRes.key || selected.key}`);
+      },
+    },
+    {
+      label: "Edit",
+      className: "btn btn-sm btn-outline-secondary",
+      onClick: async (selected) => {
+        currentEntry = findEntryByKey(selected.key);
+        if (editor) {
+          editor.value = selected.proposed_raw || "";
+        }
+        updateSelectedCardState();
+        closePicker();
+        showToast(`Loaded proposed patch for ${selected.key}`);
+      },
+    },
+    {
+      label: "Reject",
+      className: "btn btn-sm btn-outline-danger",
+      onClick: async (selected) => {
+        const suppress = await showConfirmDialog(
+          "Suppress Suggestion",
+          "Suppress this exact suggestion on future scans? Choose Cancel to dismiss it for now.",
+          "Suppress",
+          "btn-danger",
+        );
+        const rejectRes = await rejectScanItem(selected, Boolean(suppress));
+        if (!rejectRes.ok) {
+          throw new Error(rejectRes.description || rejectRes.error || "Failed to reject suggestion");
+        }
+        removePickerItem(selected.id);
+        scanState.items = scanState.items.filter((item) => item.id !== selected.id);
+        showToast(suppress ? `Suppressed ${selected.key}` : `Rejected ${selected.key}`);
+      },
+    },
+    {
+      label: "Close",
+      className: "btn btn-sm btn-outline-secondary",
+      requiresSelection: false,
+      onClick: async () => {
+        closePicker();
+      },
+    },
+  ];
+}
+
 async function openScanReviewPicker(scanResult) {
   if (scanResult.service === "pdf-coverage") {
     openPdfCoverageModal(scanResult);
@@ -1408,11 +1624,6 @@ async function openScanReviewPicker(scanResult) {
   }
 
   const items = buildScanReviewItems(scanResult.items || []);
-  if (!items.length) {
-    showToast(`No actionable ${scanResult.label || "scan"} updates found`);
-    return;
-  }
-
   if (pickerState?.mode === "quality-scan") {
     const existingIds = new Set(pickerState.items.map((item) => item.id));
     const additions = items.filter((item) => !existingIds.has(item.id));
@@ -1429,75 +1640,12 @@ async function openScanReviewPicker(scanResult) {
         updatePickerInfo();
       }
     }
+    pickerState.extraActions = scanExtraActions();
+    pickerState.statusLine = scanStatusLine();
+    renderPickerExtras();
     return;
   }
-
-  openPicker({
-    mode: "quality-scan",
-    title: `${scanResult.label || "Scan"} Review`,
-    subtitle: "Review each proposed BibLaTeX amendment. Nothing is written until you accept or save an edited proposal.",
-    confirmText: "Apply",
-    emptyMessage: "No actionable entries in this scan.",
-    items,
-    singleSelect: true,
-    showPreview: true,
-    previewLabel: "Proposed amendment",
-    previewEmptyText: "Select an entry to preview its proposed amendment.",
-    previewRenderer: renderQualityPreview,
-    actions: [
-      {
-        label: "Accept",
-        className: "btn btn-sm btn-primary",
-        onClick: async (selected) => {
-          const applyRes = await applyScanItem(selected);
-          if (!applyRes.ok) {
-            throw new Error(applyRes.description || applyRes.error || "Failed to apply patch");
-          }
-          await loadEntries();
-          currentEntry = findEntryByKey(selected.key);
-          if (currentEntry && editor) {
-            editor.value = currentEntry.raw || "";
-          }
-          removePickerItem(selected.id);
-          showToast(`Applied scan patch for ${selected.key}`);
-        },
-      },
-      {
-        label: "Edit",
-        className: "btn btn-sm btn-outline-secondary",
-        onClick: async (selected) => {
-          currentEntry = findEntryByKey(selected.key);
-          if (editor) {
-            editor.value = selected.proposed_raw || "";
-          }
-          updateSelectedCardState();
-          closePicker();
-          showToast(`Loaded proposed patch for ${selected.key}`);
-        },
-      },
-      {
-        label: "Reject",
-        className: "btn btn-sm btn-outline-danger",
-        onClick: async (selected) => {
-          const suppress = window.confirm("Suppress this exact suggestion on future scans?\nChoose OK to suppress or Cancel to dismiss it for now.");
-          const rejectRes = await rejectScanItem(selected, suppress);
-          if (!rejectRes.ok) {
-            throw new Error(rejectRes.description || rejectRes.error || "Failed to reject suggestion");
-          }
-          removePickerItem(selected.id);
-          showToast(suppress ? `Suppressed ${selected.key}` : `Rejected ${selected.key}`);
-        },
-      },
-      {
-        label: "Close",
-        className: "btn btn-sm btn-outline-secondary",
-        requiresSelection: false,
-        onClick: async () => {
-          closePicker();
-        },
-      },
-    ],
-  });
+  ensureScanWorkspaceOpen();
 }
 
 async function startScanFromModal(service) {
@@ -1525,10 +1673,9 @@ async function startScanFromModal(service) {
   scanState.total = job.total || 0;
   scanState.scanned = 0;
   scanState.statusText = `${scanState.currentLabel} scan underway...`;
-  scanState.progressText = `0 / ${scanState.total || 0} scanned`;
   setScanEditLock(true);
   refreshScanToolbarButton();
-  renderScanModal();
+  ensureScanWorkspaceOpen();
   scheduleScanPoll();
 }
 
@@ -1546,8 +1693,7 @@ function scheduleScanPoll() {
       scanState.scanned = res.scanned || 0;
       scanState.total = res.total || 0;
       scanState.actionableCount = res.actionable_count || 0;
-      scanState.statusText = res.message || scanState.statusText;
-      scanState.progressText = `${scanState.scanned} / ${scanState.total || 0} scanned • ${scanState.actionableCount} actionable`;
+      scanState.statusText = `Scanned ${scanState.scanned} of ${scanState.total || 0} entries.`;
 
       if (Array.isArray(res.items) && res.items.length) {
         scanState.items.push(...res.items);
@@ -1559,7 +1705,11 @@ function scheduleScanPoll() {
       }
 
       if (res.status === "running") {
-        renderScanModal();
+        if (pickerState?.mode === "quality-scan") {
+          pickerState.statusLine = scanStatusLine();
+          pickerState.extraActions = scanExtraActions();
+          renderPickerExtras();
+        }
         scheduleScanPoll();
         return;
       }
@@ -1567,21 +1717,31 @@ function scheduleScanPoll() {
       scanState.running = false;
       setScanEditLock(false);
       refreshScanToolbarButton();
-      renderScanModal();
+      if (pickerState?.mode === "quality-scan") {
+        pickerState.statusLine = res.status === "completed"
+          ? `${scanState.currentLabel} scan finished • ${scanState.items.length} actionable`
+          : `${scanState.currentLabel} scan stopped`;
+        pickerState.extraActions = scanExtraActions();
+        renderPickerExtras();
+      }
       if (res.status === "completed") {
         showToast(`${scanState.currentLabel} scan finished`);
       } else if (res.status === "cancelled") {
         showToast(`${scanState.currentLabel} scan stopped`);
       } else if (res.status === "failed") {
-        alert(res.message || "Scan failed");
+        await showMessageDialog("Scan Failed", res.message || "Scan failed");
       }
     } catch (err) {
       scanState.running = false;
       scanState.statusText = err.message || "Scan failed";
       setScanEditLock(false);
       refreshScanToolbarButton();
-      renderScanModal();
-      alert(err.message || "Scan failed");
+      if (pickerState?.mode === "quality-scan") {
+        pickerState.statusLine = scanStatusLine();
+        pickerState.extraActions = scanExtraActions();
+        renderPickerExtras();
+      }
+      await showMessageDialog("Scan Failed", err.message || "Scan failed");
     }
   }, 1000);
 }
@@ -1593,7 +1753,10 @@ async function stopCurrentScan() {
     throw new Error(res.description || res.error || "Failed to stop scan");
   }
   scanState.statusText = "Stopping scan...";
-  renderScanModal();
+  if (pickerState?.mode === "quality-scan") {
+    pickerState.statusLine = scanStatusLine();
+    renderPickerExtras();
+  }
 }
 
 function openCurrentScanResults() {
@@ -1608,6 +1771,69 @@ function openCurrentScanResults() {
   });
 }
 
+function exportSelectedPdfCount(items) {
+  return items.filter((item) => item.selected && item.hasPdf).length;
+}
+
+function exportStatusLine() {
+  if (!pickerState || pickerState.mode !== "export") {
+    return exportState.format === "zip"
+      ? "Choose entries to export as a ZIP with PDFs and a static HTML index."
+      : "Choose entries to export as BibLaTeX.";
+  }
+  const selectedCount = pickerState.items.filter((item) => item.selected).length;
+  const pdfCount = exportSelectedPdfCount(pickerState.items);
+  if (!selectedCount) {
+    return exportState.format === "zip"
+      ? "Choose entries to export as a ZIP with PDFs and a static HTML index."
+      : "Choose entries to export as BibLaTeX.";
+  }
+  if (exportState.format === "zip") {
+    return `${selectedCount} entries selected • ${pdfCount} PDFs available • ${exportState.htmlView === "cards" ? "card" : "list"} HTML index`;
+  }
+  return `${selectedCount} entries selected for BibLaTeX export`;
+}
+
+function exportExtraActions() {
+  return [
+    {
+      type: "buttonGroup",
+      className: "btn-group btn-group-sm",
+      value: exportState.format,
+      options: [
+        { value: "bib", label: "BibLaTeX Only" },
+        { value: "zip", label: "ZIP with PDFs" },
+      ],
+      onChange: (value) => {
+        exportState.format = value || "bib";
+        if (pickerState?.mode === "export") {
+          pickerState.extraActions = exportExtraActions();
+          pickerState.statusLine = exportStatusLine();
+          renderPickerExtras();
+          updatePickerInfo();
+        }
+      },
+    },
+    {
+      type: "buttonGroup",
+      className: "btn-group btn-group-sm",
+      value: exportState.htmlView,
+      options: [
+        { value: "list", label: "HTML: List View" },
+        { value: "cards", label: "HTML: Card View" },
+      ],
+      onChange: (value) => {
+        exportState.htmlView = value || "list";
+        if (pickerState?.mode === "export") {
+          pickerState.extraActions = exportExtraActions();
+          pickerState.statusLine = exportStatusLine();
+          renderPickerExtras();
+        }
+      },
+    },
+  ];
+}
+
 async function handleClearScanRejections() {
   const res = await clearScanRejections();
   if (!res.ok) {
@@ -1616,7 +1842,10 @@ async function handleClearScanRejections() {
   scanState.statusText = res.cleared
     ? `Cleared ${res.cleared} past rejection${res.cleared === 1 ? "" : "s"}.`
     : "No past rejections were stored.";
-  renderScanModal();
+  if (pickerState?.mode === "quality-scan") {
+    pickerState.statusLine = scanStatusLine();
+    renderPickerExtras();
+  }
   showToast(scanState.statusText);
 }
 
@@ -1665,19 +1894,28 @@ function downloadBlob(blob, filename) {
 }
 
 function openExportPicker() {
+  exportState = {
+    format: exportState.format || "bib",
+    htmlView: exportState.htmlView || "list",
+  };
   openPicker({
     mode: "export",
     title: "Export Entries",
-    subtitle: "Search and select the entries to export.",
+    subtitle: "Search and select entries, then export BibLaTeX or a ZIP with PDFs and an HTML index.",
     confirmText: "Export",
     emptyMessage: "No entries available to export.",
     items: buildExportItems(),
+    extraActions: exportExtraActions(),
+    statusLine: exportStatusLine(),
     onConfirm: async (selectedItems) => {
-      const res = await requestExportEntries(selectedItems.map((item) => item.key));
+      const res = await requestExportEntries(selectedItems.map((item) => item.key), {
+        format: exportState.format,
+        htmlView: exportState.htmlView,
+      });
       if (!res.ok) {
         throw new Error(res.error || "Export failed");
       }
-      downloadBlob(res.blob, "export.bib");
+      downloadBlob(res.blob, exportState.format === "zip" ? "export.zip" : "export.bib");
       showToast(`Exported ${res.exportedCount || selectedItems.length} items`);
     },
   });
@@ -1807,7 +2045,7 @@ function initUI() {
       await openBibFilePicker();
     } catch (err) {
       console.error("Bib file switcher failed:", err);
-      alert(err.message || "Failed to load bib files");
+      await showMessageDialog("Bibliography Load Failed", formatUiError(err, "Failed to load bib files"));
     }
   });
   getEl("importToolbarBtn")?.addEventListener("click", openImportFilePicker);
@@ -1815,10 +2053,10 @@ function initUI() {
     try {
       await loadScanServices();
       scanState.statusText = "";
-      openScanModal();
+      ensureScanWorkspaceOpen();
     } catch (err) {
       console.error("Scan launcher failed:", err);
-      alert(err.message || "Failed to load scan services");
+      await showMessageDialog("Scan Services Failed", formatUiError(err, "Failed to load scan services"));
     }
   });
   getEl("exportToolbarBtn")?.addEventListener("click", openExportPicker);
@@ -1827,7 +2065,7 @@ function initUI() {
       await openHistoryPicker();
     } catch (err) {
       console.error("History failed:", err);
-      alert(err.message || "Failed to load history");
+      await showMessageDialog("History Failed", formatUiError(err, "Failed to load history"));
     }
   });
 
@@ -1852,7 +2090,7 @@ function initUI() {
         await runImport(file);
       } catch (err) {
         console.error("Import failed:", err);
-        alert(err.message || "Import failed");
+        await showMessageDialog("Import Failed", formatUiError(err, "Import failed"));
       }
     });
   }
@@ -1879,7 +2117,7 @@ function initUI() {
         showToast(`Attached PDF for ${key}`);
       } catch (err) {
         console.error("PDF attach failed:", err);
-        alert(err.message || "Failed to attach PDF");
+        await showMessageDialog("PDF Attach Failed", formatUiError(err, "Failed to attach PDF"));
       } finally {
         event.target.value = "";
         event.target.dataset.entryKey = "";
@@ -1888,35 +2126,16 @@ function initUI() {
   }
 
   getEl("pickerCloseBtn")?.addEventListener("click", closePicker);
-  getEl("scanCloseBtn")?.addEventListener("click", closeScanModal);
-  getEl("scanStopBtn")?.addEventListener("click", async () => {
-    try {
-      await stopCurrentScan();
-    } catch (err) {
-      console.error("Stop scan failed:", err);
-      alert(err.message || "Failed to stop scan");
+  getEl("dialogCloseBtn")?.addEventListener("click", () => closeDialog(false));
+  getEl("dialogBackdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) {
+      closeDialog(false);
     }
-  });
-  getEl("scanOpenResultsBtn")?.addEventListener("click", () => {
-    openCurrentScanResults();
   });
   getEl("pdfCoverageCloseBtn")?.addEventListener("click", closePdfCoverageModal);
-  getEl("scanBackdrop")?.addEventListener("click", (event) => {
-    if (event.target === event.currentTarget) {
-      closeScanModal();
-    }
-  });
   getEl("pdfCoverageBackdrop")?.addEventListener("click", (event) => {
     if (event.target === event.currentTarget) {
       closePdfCoverageModal();
-    }
-  });
-  getEl("scanClearRejectionsBtn")?.addEventListener("click", async () => {
-    try {
-      await handleClearScanRejections();
-    } catch (err) {
-      console.error("Clear rejections failed:", err);
-      alert(err.message || "Failed to clear past rejections");
     }
   });
   getEl("pdfCoverageFilter")?.addEventListener("change", (event) => {
@@ -1955,7 +2174,7 @@ function initUI() {
     if (!pickerState) return;
     const selectedItems = pickerState.items.filter((item) => item.selected);
     if (!selectedItems.length) {
-      alert("Select at least one entry.");
+      await showMessageDialog("Selection Required", "Select at least one entry.");
       return;
     }
 
@@ -1968,7 +2187,7 @@ function initUI() {
       closePicker();
     } catch (err) {
       console.error(`${pickerState.mode} failed:`, err);
-      alert(err.message || `${pickerState.mode} failed`);
+      await showMessageDialog("Action Failed", formatUiError(err, `${pickerState.mode} failed`));
     } finally {
       if (confirmBtn) {
         confirmBtn.disabled = false;
@@ -1978,12 +2197,12 @@ function initUI() {
   });
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && pickerState) {
-      closePicker();
+    if (event.key === "Escape" && getEl("dialogBackdrop")?.classList.contains("open")) {
+      closeDialog(false);
       return;
     }
-    if (event.key === "Escape" && getEl("scanBackdrop")?.classList.contains("open")) {
-      closeScanModal();
+    if (event.key === "Escape" && pickerState) {
+      closePicker();
       return;
     }
     if (event.key === "Escape" && getEl("pdfCoverageBackdrop")?.classList.contains("open")) {
@@ -2018,7 +2237,7 @@ function initUI() {
       await runImport(file);
     } catch (err) {
       console.error("Drop import failed:", err);
-      alert(err.message || "Import failed");
+      await showMessageDialog("Import Failed", formatUiError(err, "Import failed"));
     }
   });
 
@@ -2036,6 +2255,6 @@ document.addEventListener("DOMContentLoaded", () => {
   initUI();
   Promise.all([loadEntries(), refreshBibFileButton()]).catch((err) => {
     console.error("Failed to load entries:", err);
-    alert(err.message || "Failed to load bibliography");
+    showMessageDialog("Load Failed", formatUiError(err, "Failed to load bibliography"));
   });
 });

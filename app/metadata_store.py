@@ -77,6 +77,28 @@ def clear_entry_metadata(key):
         save_metadata(data)
 
 
+def rename_entry_metadata(old_key, new_key):
+    if not old_key or not new_key or old_key == new_key:
+        return
+
+    data = load_metadata()
+    entries = data.setdefault("entries", {})
+    current = entries.get(old_key)
+    if not isinstance(current, dict):
+        return
+
+    target = entries.get(new_key, {})
+    if not isinstance(target, dict):
+        target = {}
+
+    merged = dict(target)
+    merged.update(current)
+    merged["updated_at"] = _utc_now()
+    entries[new_key] = merged
+    entries.pop(old_key, None)
+    save_metadata(data)
+
+
 def set_entry_flag(key, flag_name, enabled, detail=None):
     detail = detail or {}
 

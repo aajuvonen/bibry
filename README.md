@@ -14,7 +14,7 @@ The project stays deliberately simple: no database, no accounts, no heavy fronte
 * Preview import conflicts with entry-level diffs
 * Run Crossref and WorldCat metadata scans from a shared review workflow
 * Run a PDF coverage report with priority grouping and direct attach/suppress actions
-* Export selected entries to `export.bib`
+* Export selected entries to `export.bib` or to a ZIP with matching PDFs plus a static HTML index
 * Keep bounded per-file history with restore support
 * Switch between multiple `.bib` files in `bib/`
 * Show DOI, URL, arXiv, and PDF links when available
@@ -34,6 +34,8 @@ The Crossref scan resolves entries by DOI first, then title/author/year. It prop
 * Loaded into the editor for manual adjustment
 * Rejected, optionally with suppression so it does not reappear unchanged
 
+When a reviewed amendment changes the leading author or year in a way that matches the existing `AuthorYear` key pattern, Bibry also updates the citation key and carries a matching `pdf/<key>.pdf` file forward to the renamed key when possible.
+
 ### WorldCat Scan
 
 The WorldCat scan targets book-like entries such as books, in-collection items, and theses. It prefers ISBN matching and falls back to title/author lookup, then proposes conservative updates for fields such as ISBN, publisher, year, title, and edition using the same Accept / Edit / Reject review flow.
@@ -47,6 +49,21 @@ The PDF coverage scan is a local analysis pass. It checks for PDFs via `pdf/<cit
 * Low priority: misc, online, software, datasets, multimedia, and similar items
 
 The report includes counts per category plus actions to open the entry, attach a PDF, or mark `No PDF Expected` so intentionally non-PDF items stay out of future scans.
+
+## Export Workflows
+
+Bibry's export picker lets you choose between:
+
+* `BibLaTeX Only`, which downloads `export.bib`
+* `ZIP with PDFs`, which downloads `export.zip`
+
+ZIP exports include:
+
+* `export.bib`
+* `index.html`
+* `pdf/<citationKey>.pdf` for selected entries that have local PDFs
+
+The HTML index can be rendered in either a list-style or card-style layout to mirror Bibry's main browsing views.
 
 ## Data Layout
 
