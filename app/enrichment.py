@@ -15,6 +15,8 @@ import requests
 from . import bibstore
 from .latex import latex_to_text
 from .metadata_store import get_entry_metadata, set_entry_flag, set_entry_provenance
+from .orphan_pdf_store import fingerprint as pdf_fingerprint, is_ignored as orphan_is_ignored
+from .sort_dedupe_bibtex import BibEntry
 
 
 SCAN_PHASE = "phase1_crossref"
@@ -920,10 +922,81 @@ class PdfCoverageScanner:
         return mapping.get(priority, mapping["low"])
 
 
+def _pdf_key_token(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+class PdfOrphanScanner:
+    service_name = "pdf-orphans"
+    display_name = "Orphan PDFs"
+    phase_name = "phase4_pdf_orphans"
+
+    def availability(self):
+        return {"available": True, "reason": "Local scan of PDF filenames against the global bibliography catalogue."}
+
+    def scan_entries(self, entries_by_key=None):
+        catalogue = bibstore.get_library().all_entries_with_memberships()
+        by_key = {}
+        for item in catalogue:
+            parsed = BibEntry(item["raw"])
+            parsed.key = item["key"]
+            parsed.type = item["entry_type"]
+            key = item["key"]
+            if key:
+                by_key.setdefault(key, []).append({**item, "entry": parsed})
+        by_token = {}
+        for key in by_key:
+            by_token.setdefault(_pdf_key_token(key), []).append(key)
+
+        items = []
+        pdf_dir = bibstore.ROOT / "pdf"
+        for path in sorted(pdf_dir.glob("*.pdf")):
+            file_hash = pdf_fingerprint(path)
+            if orphan_is_ignored(path.name, file_hash):
+                continue
+            stem = path.stem
+            exact_keys = [stem] if stem in by_key else []
+            normalized_keys = by_token.get(_pdf_key_token(stem), [])
+            keys = exact_keys or normalized_keys
+            memberships = []
+            for key in keys:
+                memberships.extend({
+                    "key": key,
+                    "filename": match["filename"],
+                    "title": _clean_text(match["entry"].fields.get("title")),
+                } for match in by_key[key])
+            if exact_keys:
+                status = "matched" if memberships else "orphan"
+            elif len(normalized_keys) == 1:
+                status = "normalized-match"
+            elif len(normalized_keys) > 1:
+                status = "ambiguous"
+            else:
+                status = "orphan"
+            items.append({
+                "id": f"{self.phase_name}:{path.name}:{file_hash[:12]}",
+                "phase": self.phase_name,
+                "service": self.service_name,
+                "filename": path.name,
+                "path": f"pdf/{path.name}",
+                "size": path.stat().st_size,
+                "modified_at": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                "fingerprint": file_hash,
+                "status": status,
+                "candidate_keys": normalized_keys,
+                "memberships": memberships,
+                "can_rename": status == "normalized-match",
+            })
+        counts = {status: sum(1 for item in items if item["status"] == status)
+                  for status in ("matched", "normalized-match", "ambiguous", "orphan")}
+        return {"items": items, "counts": counts, "scope": "global-catalogue"}
+
+
 SCAN_SERVICES = {
     CrossrefScanner.service_name: CrossrefScanner(),
     WorldCatScanner.service_name: WorldCatScanner(),
     PdfCoverageScanner.service_name: PdfCoverageScanner(),
+    PdfOrphanScanner.service_name: PdfOrphanScanner(),
 }
 
 

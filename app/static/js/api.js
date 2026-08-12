@@ -121,6 +121,15 @@ export async function markNoPdfExpected(key, enabled = true) {
   return await parseResponse(res);
 }
 
+export async function applyOrphanPdfAction(filename, fingerprint, action, key = "") {
+  const res = await fetch("/api/scan/orphans/action", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename, fingerprint, action, key }),
+  });
+  return await parseResponse(res);
+}
+
 export async function fetchBibFiles() {
   const res = await fetch("/api/bibs");
   return await parseResponse(res);

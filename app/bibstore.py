@@ -7,6 +7,7 @@ from pathlib import Path
 from .latex import latex_to_text
 from .sort_dedupe_bibtex import BibEntry
 from .sort_dedupe_bibtex import process_bibtex_text, split_entries
+from .library_store import LibraryStore
 
 # Path to the BibTeX file (flat-file store)
 ROOT = Path(__file__).parent.parent
@@ -22,11 +23,22 @@ BIB_VERSION = 0
 _BIB_SIGNATURE = None
 _DB_CACHE = None
 _LAST_BIB_STATE = {}
+_LIBRARY = None
+
+
+def get_library():
+    global _LIBRARY
+    if _LIBRARY is None:
+        _LIBRARY = LibraryStore(ROOT, BIB_DIR)
+    return _LIBRARY
 
 
 def ensure_bib_dirs():
     BIB_DIR.mkdir(parents=True, exist_ok=True)
     HISTORY_ROOT.mkdir(parents=True, exist_ok=True)
+    library = get_library()
+    if not library.has_bibliographies():
+        library.migrate_existing(BIB_DIR.glob("*.bib"))
 
 
 def _safe_bib_name(filename):
@@ -383,17 +395,10 @@ def load_bib():
     signature = get_bib_signature()
     if _DB_CACHE is not None and signature == _BIB_SIGNATURE:
         return _DB_CACHE
-    bibfile = get_current_bib_path()
-    if not bibfile.exists():
-        # If no file, start with empty database
-        db = bibtexparser.bibdatabase.BibDatabase()
-        db.entries = []
-        _BIB_SIGNATURE = None
-        _DB_CACHE = db
-        return db
-    with open(bibfile, encoding="utf-8") as f:
-        parser = bibtexparser.bparser.BibTexParser(common_strings=True)
-        db = bibtexparser.load(f, parser)
+    filename = get_current_bib_filename()
+    entries = get_library().entries_for(filename)
+    db = bibtexparser.bibdatabase.BibDatabase()
+    db.entries = entries
     _BIB_SIGNATURE = signature
     _DB_CACHE = db
     return db
@@ -411,9 +416,9 @@ def save_bib(db, action="save"):
         set_last_bib_state(previous_text)
     else:
         set_last_bib_state(None)
-    # Write new state
     writer = bibtexparser.bwriter.BibTexWriter()
-    new_text = writer.write(db)
+    new_text = writer.write(db) if db.entries else ""
+    get_library().save_entries(get_current_bib_filename(), db.entries)
     bibfile.write_text(new_text, encoding="utf-8")
     _record_history(previous_text, new_text, action)
     _BIB_SIGNATURE = get_bib_signature()
@@ -433,8 +438,13 @@ def save_bib_text(text, action="save-text"):
     else:
         set_last_bib_state(None)
 
-    bibfile.write_text(text, encoding="utf-8")
-    _record_history(previous_text, text, action)
+    parser = bibtexparser.bparser.BibTexParser(common_strings=True)
+    db = bibtexparser.loads(text, parser=parser)
+    writer = bibtexparser.bwriter.BibTexWriter()
+    normalized_text = writer.write(db) if db.entries else ""
+    get_library().save_entries(get_current_bib_filename(), db.entries)
+    bibfile.write_text(normalized_text, encoding="utf-8")
+    _record_history(previous_text, normalized_text, action)
     _BIB_SIGNATURE = None
     _DB_CACHE = None
     BIB_VERSION += 1

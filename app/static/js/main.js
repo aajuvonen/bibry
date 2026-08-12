@@ -13,6 +13,7 @@ import {
   clearScanRejections,
   attachPdfToEntry,
   markNoPdfExpected,
+  applyOrphanPdfAction,
   fetchBibFiles,
   selectBibFile,
   undoLast,
@@ -60,6 +61,7 @@ let pdfCoverageState = {
   filter: "all",
   sort: "priority",
 };
+let orphanPdfState = { items: [], counts: {} };
 let exportState = {
   format: "bib",
   htmlView: "list",
@@ -717,12 +719,12 @@ function scanStatusLine() {
   if (scanState.currentLabel && scanState.items.length) {
     return `${scanState.currentLabel} ready • ${scanState.items.length} actionable`;
   }
-  return "Choose Crossref or WorldCat to start a rolling scan. PDF Coverage opens a separate report.";
+  return "Choose Crossref or WorldCat to start a rolling scan. PDF reports are local and reviewable.";
 }
 
 function scanExtraActions() {
   const actions = scanState.services
-    .filter((service) => service.name !== "pdf-coverage")
+    .filter((service) => !["pdf-coverage", "pdf-orphans"].includes(service.name))
     .map((service) => ({
       label: scanState.running && scanState.currentService === service.name ? `${service.label} Running` : `Run ${service.label}`,
       className: "btn btn-sm btn-outline-primary",
@@ -742,6 +744,15 @@ function scanExtraActions() {
       onClick: async () => {
         await startScanFromModal(pdfCoverageService);
       },
+    });
+  }
+  const orphanService = scanState.services.find((service) => service.name === "pdf-orphans");
+  if (orphanService) {
+    actions.push({
+      label: orphanService.label || "Orphan PDFs",
+      className: "btn btn-sm btn-outline-secondary",
+      disabled: scanState.running,
+      onClick: async () => await startScanFromModal(orphanService),
     });
   }
   actions.push({
@@ -923,6 +934,75 @@ function closePdfCoverageModal() {
   if (!backdrop) return;
   backdrop.classList.remove("open");
   backdrop.setAttribute("aria-hidden", "true");
+}
+
+function closeOrphanPdfModal() {
+  const backdrop = getEl("orphanPdfBackdrop");
+  if (!backdrop) return;
+  backdrop.classList.remove("open");
+  backdrop.setAttribute("aria-hidden", "true");
+}
+
+function renderOrphanPdfList() {
+  const counts = orphanPdfState.counts || {};
+  const countsEl = getEl("orphanPdfCounts");
+  if (countsEl) {
+    countsEl.innerHTML = Object.entries(counts).map(([key, value]) =>
+      `<span class="badge text-bg-${key === "orphan" ? "danger" : key === "ambiguous" ? "warning" : "secondary"}">${escapeHtml(key)} ${value}</span>`
+    ).join(" ");
+  }
+  const list = getEl("orphanPdfList");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!orphanPdfState.items.length) {
+    list.innerHTML = `<div class="text-muted small">No unignored PDF files found.</div>`;
+    return;
+  }
+  for (const item of orphanPdfState.items) {
+    const row = document.createElement("div");
+    row.className = "pdf-coverage-item";
+    const candidates = (item.memberships || []).map((m) => `${m.key} (${m.filename})`).join(", ");
+    row.innerHTML = `<div class="pdf-coverage-main">
+      <div class="d-flex flex-wrap align-items-center gap-2"><span class="picker-key">${escapeHtml(item.filename)}</span>
+      <span class="badge text-bg-light">${escapeHtml(item.status)}</span></div>
+      <div class="picker-meta">${escapeHtml(candidates || "No catalogue candidate")}</div>
+      <div class="small text-muted">${escapeHtml(item.path)} • ${Number(item.size || 0).toLocaleString()} bytes</div>
+    </div><div class="pdf-coverage-actions"></div>`;
+    const actions = row.querySelector(".pdf-coverage-actions");
+    if (item.can_rename && item.candidate_keys?.length === 1) {
+      const rename = document.createElement("button");
+      rename.className = "btn btn-sm btn-primary";
+      rename.textContent = `Rename to ${item.candidate_keys[0]}`;
+      rename.onclick = async () => {
+        const res = await applyOrphanPdfAction(item.filename, item.fingerprint, "rename", item.candidate_keys[0]);
+        if (!res.ok) throw new Error(res.description || res.error || "Failed to rename PDF");
+        orphanPdfState.items = orphanPdfState.items.filter((candidate) => candidate.id !== item.id);
+        renderOrphanPdfList(); showToast(`Renamed ${item.filename}`);
+      };
+      actions.appendChild(rename);
+    }
+    const ignore = document.createElement("button");
+    ignore.className = "btn btn-sm btn-outline-secondary";
+    ignore.textContent = "Ignore";
+    ignore.onclick = async () => {
+      const res = await applyOrphanPdfAction(item.filename, item.fingerprint, "ignore");
+      if (!res.ok) throw new Error(res.description || res.error || "Failed to ignore PDF");
+      orphanPdfState.items = orphanPdfState.items.filter((candidate) => candidate.id !== item.id);
+      renderOrphanPdfList();
+    };
+    actions.appendChild(ignore);
+    list.appendChild(row);
+  }
+}
+
+function openOrphanPdfModal(scanResult) {
+  orphanPdfState.items = scanResult.items || [];
+  orphanPdfState.counts = scanResult.counts || {};
+  const backdrop = getEl("orphanPdfBackdrop");
+  if (!backdrop) return;
+  backdrop.classList.add("open");
+  backdrop.setAttribute("aria-hidden", "false");
+  renderOrphanPdfList();
 }
 
 async function loadScanServices() {
@@ -1657,6 +1737,12 @@ async function startScanFromModal(service) {
     await openScanReviewPicker(res);
     return;
   }
+  if (service.name === "pdf-orphans") {
+    const res = await runScan(service.name);
+    if (!res.ok) throw new Error(res.description || res.error || "Orphan scan failed");
+    openOrphanPdfModal(res);
+    return;
+  }
 
   const job = await startScanJob(service.name);
   if (!job.ok && job.status !== 202) {
@@ -2126,6 +2212,7 @@ function initUI() {
   }
 
   getEl("pickerCloseBtn")?.addEventListener("click", closePicker);
+  getEl("orphanPdfCloseBtn")?.addEventListener("click", closeOrphanPdfModal);
   getEl("dialogCloseBtn")?.addEventListener("click", () => closeDialog(false));
   getEl("dialogBackdrop")?.addEventListener("click", (event) => {
     if (event.target === event.currentTarget) {

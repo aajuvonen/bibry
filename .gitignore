@@ -240,10 +240,22 @@ bh_unicode_properties.cache
 GitHub.sublime-settings
 
 # Bibry local data
+# Personal bibliographies and generated catalogue data are deployment state,
+# never source files.
 bib/*
+bib/*.bib
+bib/library.sqlite3*
+bib/.active_bib
+bib/metadata/
+bib/history/*
+bib/scan_jobs/
+bib/cache/
+bib/orphan_pdf_state.json
 !bib/.gitkeep
 !bib/history/
-bib/history/*
 !bib/history/.gitkeep
+# PDFs and any related deployment-side files are personal data and may be large.
 pdf/*
+pdf/**/*.pdf
+pdf/*.pdf
 !pdf/.gitkeep

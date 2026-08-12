@@ -1,8 +1,8 @@
 # Bibry
 
-Bibry is a lightweight web interface for browsing and editing a flat BibTeX/BibLaTeX bibliography. It is designed for personal research libraries where the data lives in normal `.bib` files plus an optional directory of PDFs.
+Bibry is a lightweight web interface for browsing and editing flat BibTeX/BibLaTeX bibliographies. It is designed for personal research libraries where the data lives in normal `.bib` files plus an optional directory of PDFs.
 
-The project stays deliberately simple: no database, no accounts, no heavy frontend framework. The default runtime is now Docker, so Bibry can run locally, on a home server, or behind a VPN without needing an interactive shell session.
+The project stays deliberately simple: one local SQLite file, no accounts, and no heavy frontend framework. The default runtime is now Docker, so Bibry can run locally, on a home server, or behind a VPN without needing an interactive shell session.
 
 ## Features
 
@@ -14,8 +14,10 @@ The project stays deliberately simple: no database, no accounts, no heavy fronte
 * Preview import conflicts with entry-level diffs
 * Run Crossref and WorldCat metadata scans from a shared review workflow
 * Run a PDF coverage report with priority grouping and direct attach/suppress actions
+* Scan the global PDF directory for orphan files and review safe rename/ignore actions
 * Export selected entries to `export.bib` or to a ZIP with matching PDFs plus a static HTML index
 * Keep bounded per-file history with restore support
+* Share identical entries between bibliographies while retaining near-identical variants
 * Switch between multiple `.bib` files in `bib/`
 * Show DOI, URL, arXiv, and PDF links when available
 * Work reasonably well on mobile as well as desktop
@@ -50,6 +52,12 @@ The PDF coverage scan is a local analysis pass. It checks for PDFs via `pdf/<cit
 
 The report includes counts per category plus actions to open the entry, attach a PDF, or mark `No PDF Expected` so intentionally non-PDF items stay out of future scans.
 
+### Orphan PDF Report
+
+The Orphan PDFs report compares every PDF filename in `pdf/` with citation keys from the global catalogue, including bibliographies other than the active one. It reports exact matches, normalized filename matches, ambiguous matches, and files with no candidate.
+
+The scan is read-only. For a confident normalized match, Bibry can rename the file to `pdf/<citationKey>.pdf` after collision checks. Any result can also be ignored; ignores are tied to the file fingerprint and will reappear if the file changes. Ambiguous and unmatched files require manual review.
+
 ## Export Workflows
 
 Bibry's export picker lets you choose between:
@@ -67,7 +75,7 @@ The HTML index can be rendered in either a list-style or card-style layout to mi
 
 ## Data Layout
 
-Bibry stores bibliography data directly on disk:
+Bibry stores a shared catalogue on disk and writes ordinary `.bib` projections:
 
 ```text
 project/
@@ -75,6 +83,7 @@ project/
 ├── bib/
 │   ├── main.bib
 │   ├── another-library.bib
+│   ├── library.sqlite3
 │   ├── .active_bib
 │   └── history/
 │       ├── main.bib/
@@ -86,10 +95,23 @@ project/
 └── docker-compose.yml
 ```
 
+* `bib/library.sqlite3` is the canonical catalogue of entries and bibliography membership
+* `.bib` files remain standalone, flat BibLaTeX projections suitable for LaTeX, version control, and backup
+* Identical entry data may be shared by several bibliographies
+* Citation keys remain local to a bibliography, and near-identical records can remain separate variants
+* Editing an entry in one bibliography creates a local variant; use the share operation when the edited record should be reused elsewhere
 * `bib/` contains the available bibliography files
 * `bib/.active_bib` stores the currently selected bibliography filename
 * `bib/history/<filename>/` stores recent revision history for each `.bib` file
 * `pdf/` contains optional PDFs named after BibTeX keys
+
+Only the three `.gitkeep` placeholders in the local data directories are intended for Git. Run `python3 scripts/check_repo_safety.py` before committing; it fails if personal BibTeX, PDF, SQLite, metadata, history, cache, or scan-job data is tracked or unignored.
+
+### Catalogue migration and backup
+
+On first startup after upgrading, Bibry imports every existing `bib/*.bib` file into `bib/library.sqlite3`. Exact entry data is reused automatically; records with different fields are retained as separate variants. Existing `.bib` files are not removed. The migration is idempotent.
+
+Back up both the SQLite catalogue and the `.bib` projections. The projections are useful for recovery and external LaTeX use; restoring an older projection alone does not change the catalogue after migration.
 
 If `pdf/<key>.pdf` exists, Bibry shows a PDF link for that entry automatically.
 
@@ -139,6 +161,21 @@ To rebuild after code changes:
 ```bash
 docker compose up --build
 ```
+
+## Moving data to a fresh server
+
+Clone the repository on the server, stop any existing Bibry container, and copy the deployment data before starting Compose. Copy `bib/*.bib`, `bib/library.sqlite3`, `bib/.active_bib`, `bib/metadata/`, `bib/history/` if history is wanted, and the complete `pdf/` directory. Do not copy `.venv`, `.DS_Store`, HTTP caches, or scan-job files.
+
+For example:
+
+```bash
+rsync -a --delete --exclude='.DS_Store' --exclude='scan_jobs/' --exclude='cache/' \
+  ./bib/ user@server:/srv/bibry/bib/
+rsync -a --delete --exclude='.DS_Store' ./pdf/ user@server:/srv/bibry/pdf/
+ssh user@server 'cd /srv/bibry && docker compose up --build -d'
+```
+
+Keep the original data until the server has been checked for entry counts, active bibliography, shared/variant entries, PDF links, history, and orphan scan results. The SQLite catalogue is canonical after migration; transfer it together with the projections rather than relying on a fresh migration.
 
 ## Manual Python Run
 

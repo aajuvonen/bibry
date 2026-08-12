@@ -12,6 +12,7 @@ from . import bibstore
 from .enrichment import build_entries_by_key, get_scan_service, list_scan_services
 from .latex import latex_to_text
 from .metadata_store import clear_suppressions, get_entry_metadata, rename_entry_metadata, set_entry_flag, set_entry_provenance, set_suppression
+from .orphan_pdf_store import fingerprint as pdf_fingerprint, ignore as ignore_orphan
 from .scan_jobs import cancel_scan_job, get_scan_job, start_scan_job
 from .sort_dedupe_bibtex import BibEntry, process_bibtex_text, split_entries
 
@@ -33,8 +34,10 @@ def _build_entry_cache():
     db = bibstore.load_bib()
     writer = bibtexparser.bwriter.BibTexWriter()
     cached = []
+    memberships = bibstore.get_library().memberships_for(bibstore.get_current_bib_filename())
 
     for e in db.entries:
+        membership = memberships.get(e.get("ID"), {})
         db2 = bibtexparser.bibdatabase.BibDatabase()
         db2.entries = [e]
         raw = writer.write(db2)
@@ -44,6 +47,8 @@ def _build_entry_cache():
         }
         cached.append({
             "key": e.get("ID"),
+            "entry_id": membership.get("entry_id"),
+            "work_id": membership.get("work_id"),
             "type": e.get("ENTRYTYPE"),
             "fields": fields,
             "raw": raw,
@@ -381,6 +386,8 @@ def api_entries():
         statuses, metadata = _entry_statuses(entry["key"])
         out.append({
             "key": entry["key"],
+            "entry_id": entry.get("entry_id"),
+            "work_id": entry.get("work_id"),
             "type": entry["type"],
             "fields": entry["fields"],
             "raw": entry["raw"],
@@ -402,6 +409,35 @@ def api_entry(key):
     db2.entries = [entry]
     writer = bibtexparser.bwriter.BibTexWriter()
     return jsonify({"raw": writer.write(db2)})
+
+
+@api_bp.route("/entry/<key>/variants")
+def api_entry_variants(key):
+    return jsonify({"key": key, "items": bibstore.get_library().variants_for(
+        bibstore.get_current_bib_filename(), key)})
+
+
+@api_bp.route("/entry/<key>/share", methods=["POST"])
+def api_share_entry(key):
+    payload = request.json or {}
+    target_filename = payload.get("filename", "")
+    target_key = payload.get("key") or key
+    if not target_filename:
+        abort(400, "Target bibliography filename is required")
+    try:
+        target_filename = bibstore._safe_bib_name(target_filename)
+    except ValueError as exc:
+        abort(400, str(exc))
+    if not (bibstore.BIB_DIR / target_filename).exists():
+        abort(404, "Target bibliography not found")
+    try:
+        bibstore.get_library().share(bibstore.get_current_bib_filename(), key,
+                                     target_filename, target_key)
+    except KeyError:
+        abort(404, "Entry not found")
+    target_path = bibstore.BIB_DIR / target_filename
+    bibstore.get_library().refresh_projection(target_filename, target_path)
+    return jsonify({"ok": True, "filename": target_filename, "key": target_key})
 
 # Endpoint: sanitize / check data consistency
 @api_bp.route("/sanitize")
@@ -573,18 +609,17 @@ def api_import_entries():
         else:
             updated_count += 1
 
-    current_text = ""
-    current_bib = bibstore.get_current_bib_path()
-    if current_bib.exists():
-        current_text = current_bib.read_text(encoding="utf-8").strip()
-
-    parts = [current_text] if current_text else []
-    parts.extend(raw.strip() for raw in selected_entries if isinstance(raw, str) and raw.strip())
-    merged_text = "\n\n".join(parts)
-
-    normalized_text, stats = process_bibtex_text(merged_text)
-    before_count = len(bibstore.load_bib().entries)
-    bibstore.save_bib_text(normalized_text, action="import")
+    db = bibstore.load_bib()
+    by_key = {entry.get("ID"): entry for entry in db.entries if entry.get("ID")}
+    for raw in selected_entries:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        parsed = bibtexparser.loads(raw).entries
+        if len(parsed) == 1 and parsed[0].get("ID"):
+            by_key[parsed[0]["ID"]] = parsed[0]
+    db.entries = list(by_key.values())
+    bibstore.save_bib(db, action="import")
+    stats = {"after_dedupe": len(db.entries)}
 
     return jsonify({
         "ok": True,
@@ -681,7 +716,7 @@ def api_scan_run():
     else:
         actionable = result
         extra = {}
-    actionable.sort(key=lambda item: (item["key"] or "").lower())
+    actionable.sort(key=lambda item: (item.get("key") or item.get("filename") or "").lower())
     payload = {
         "service": service_name,
         "label": scanner.display_name,
@@ -790,6 +825,33 @@ def api_scan_clear_rejections():
     phase = request.json.get("phase") or ""
     cleared = clear_suppressions(phase_prefix=phase or None)
     return jsonify({"ok": True, "cleared": cleared})
+
+
+@api_bp.route("/scan/orphans/action", methods=["POST"])
+def api_orphan_action():
+    payload = request.json or {}
+    filename = Path(payload.get("filename", "")).name
+    action = payload.get("action", "")
+    source = PDF_DIR / filename
+    if not filename.lower().endswith(".pdf") or not source.exists() or source.parent != PDF_DIR:
+        abort(404, "Orphan PDF not found")
+    current_fingerprint = pdf_fingerprint(source)
+    expected_fingerprint = payload.get("fingerprint", "")
+    if expected_fingerprint and expected_fingerprint != current_fingerprint:
+        abort(409, "PDF changed since the orphan scan; rerun the scan")
+    if action == "ignore":
+        ignore_orphan(filename, current_fingerprint)
+        return jsonify({"ok": True, "action": action, "filename": filename})
+    if action != "rename":
+        abort(400, "Supported orphan actions are ignore and rename")
+    key = payload.get("key", "")
+    if not key or not re.fullmatch(r"[A-Za-z0-9_:\-]+", key):
+        abort(400, "A safe citation key is required")
+    target = PDF_DIR / f"{key}.pdf"
+    if target.exists():
+        abort(409, "The target citation-key PDF already exists")
+    source.replace(target)
+    return jsonify({"ok": True, "action": action, "filename": target.name, "key": key})
 
 
 @api_bp.route("/entry/<key>/pdf", methods=["POST"])

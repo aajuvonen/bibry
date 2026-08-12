@@ -112,6 +112,21 @@
         </div>
       </div>
     </div>
+    <div id="orphanPdfBackdrop" class="pdf-coverage-backdrop" aria-hidden="true">
+      <div class="pdf-coverage-modal" role="dialog" aria-modal="true" aria-labelledby="orphanPdfTitle">
+        <div class="pdf-coverage-header">
+          <div class="d-flex justify-content-between align-items-center gap-2">
+            <div>
+              <div id="orphanPdfTitle" class="fw-semibold">Orphan PDF Report</div>
+              <div class="small text-muted">PDF filenames checked against the global catalogue. No files are changed automatically.</div>
+            </div>
+            <button id="orphanPdfCloseBtn" class="btn btn-sm btn-outline-secondary">Close</button>
+          </div>
+          <div id="orphanPdfCounts" class="pdf-coverage-counts mt-2"></div>
+        </div>
+        <div class="pdf-coverage-body"><div id="orphanPdfList" class="pdf-coverage-list"></div></div>
+      </div>
+    </div>
     <div id="dropOverlay" class="drop-overlay" aria-hidden="true">
       <div class="drop-overlay-content">Drop a .bib file to import</div>
     </div>
