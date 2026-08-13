@@ -622,15 +622,15 @@ function renderPickerActions() {
   const actions = getEl("pickerActions");
   if (!actions) return;
   actions.querySelectorAll(".picker-action-custom").forEach((node) => node.remove());
+  getEl("pickerFooterLeft")?.querySelectorAll(".picker-action-custom").forEach((node) => node.remove());
 
   const customActions = pickerState?.actions || [];
   const confirmBtn = getEl("pickerConfirmBtn");
-  if (!customActions.length) {
+  if (!customActions.length || pickerState?.keepConfirm) {
     if (confirmBtn) confirmBtn.style.display = "";
-    return;
+  } else if (confirmBtn) {
+    confirmBtn.style.display = "none";
   }
-
-  if (confirmBtn) confirmBtn.style.display = "none";
 
   customActions.forEach((action) => {
     const button = document.createElement("button");
@@ -653,7 +653,8 @@ function renderPickerActions() {
         button.disabled = false;
       }
     });
-    actions.appendChild(button);
+    const target = action.location === "footer-left" ? getEl("pickerFooterLeft") : actions;
+    target?.appendChild(button);
   });
 }
 
@@ -1070,6 +1071,7 @@ function openPicker(config) {
     previewEmptyText: config.previewEmptyText || "",
     previewRenderer: config.previewRenderer || null,
     actions: config.actions || [],
+    keepConfirm: Boolean(config.keepConfirm),
     extraActions: config.extraActions || [],
     statusLine: config.statusLine || "",
   };
@@ -2169,10 +2171,10 @@ async function openBibFilePicker() {
     emptyMessage: "No bib files found in bib/.",
     items: buildBibFileItems(res.items || [], res.database || {}),
     singleSelect: true,
-    actions: [
+    keepConfirm: true,
+    extraActions: [
       {
         label: "Create Bib File",
-        requiresSelection: false,
         className: "btn btn-sm btn-success",
         onClick: async () => {
           const filename = window.prompt("New bibliography filename (without or with .bib):", "new.bib");
@@ -2184,9 +2186,12 @@ async function openBibFilePicker() {
           showToast(`Created ${createRes.filename}`);
         },
       },
+    ],
+    actions: [
       {
         label: "Delete Selected File",
         className: "btn btn-sm btn-outline-danger",
+        location: "footer-left",
         onClick: async (selected) => {
           if (!selected || selected.id === "__database__") throw new Error("Select an ordinary bib file first");
           const confirmed = await showConfirmDialog("Delete Bibliography", `This removes ${selected.id} and its local history, but not database entries. Continue?`, "Continue", "btn-danger");
@@ -2436,6 +2441,11 @@ function initUI() {
   });
 
   document.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && pickerState?.mode === "bib-file") {
+      event.preventDefault();
+      getEl("pickerConfirmBtn")?.click();
+      return;
+    }
     const editingTarget = ["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName);
     const modifier = event.ctrlKey || event.metaKey;
     if (modifier && !editingTarget && event.key.toLowerCase() === "a") {

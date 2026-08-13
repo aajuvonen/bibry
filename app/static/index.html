@@ -65,10 +65,12 @@
             <button id="pickerCloseBtn" class="btn btn-sm btn-outline-secondary">Close</button>
           </div>
           <div class="picker-toolbar mt-2">
-            <input id="pickerSearch" class="form-control form-control-sm" placeholder="Search entries">
-            <button id="pickerSelectVisibleBtn" class="btn btn-sm btn-outline-secondary">Select Visible</button>
-            <button id="pickerClearBtn" class="btn btn-sm btn-outline-secondary">Clear</button>
-            <div id="pickerExtraActions" class="picker-extra-actions"></div>
+            <div class="d-flex gap-2 align-items-center w-100">
+              <input id="pickerSearch" class="form-control form-control-sm flex-grow-1" placeholder="Search entries">
+              <button id="pickerSelectVisibleBtn" class="btn btn-sm btn-outline-secondary">Select Visible</button>
+              <button id="pickerClearBtn" class="btn btn-sm btn-outline-secondary">Clear</button>
+            </div>
+            <div id="pickerExtraActions" class="picker-extra-actions w-100"></div>
           </div>
           <div id="pickerStatusLine" class="picker-status-line"></div>
         </div>
@@ -80,7 +82,9 @@
           </div>
         </div>
         <div class="picker-footer d-flex justify-content-between align-items-center gap-2">
-          <div id="pickerSelectionInfo" class="small text-muted"></div>
+          <div id="pickerFooterLeft" class="d-flex align-items-center gap-2">
+            <div id="pickerSelectionInfo" class="small text-muted"></div>
+          </div>
           <div id="pickerActions" class="picker-actions">
             <button id="pickerConfirmBtn" class="btn btn-sm btn-primary">Confirm</button>
           </div>
