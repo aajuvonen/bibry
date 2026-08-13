@@ -11,7 +11,7 @@ import bibtexparser
 from . import bibstore
 from .enrichment import build_entries_by_key, get_scan_service, list_scan_services
 from .latex import latex_to_text
-from .metadata_store import clear_suppressions, get_entry_metadata, rename_entry_metadata, set_entry_flag, set_entry_provenance, set_suppression
+from .metadata_store import clear_suppressions, get_entry_metadata, load_metadata, rename_entry_metadata, set_entry_flag, set_entry_provenance, set_suppression
 from .orphan_pdf_store import fingerprint as pdf_fingerprint, ignore as ignore_orphan
 from .scan_jobs import cancel_scan_job, get_scan_job, start_scan_job
 from .sort_dedupe_bibtex import BibEntry, process_bibtex_text, split_entries
@@ -65,6 +65,10 @@ def warm_entries_cache():
 
 def _entry_statuses(key):
     metadata = get_entry_metadata(key)
+    return _entry_statuses_from_metadata(metadata)
+
+
+def _entry_statuses_from_metadata(metadata):
     flags = metadata.get("flags", {}) if isinstance(metadata, dict) else {}
     statuses = []
     for name in ("retracted", "withdrawn"):
@@ -404,22 +408,21 @@ def api_select_bib():
     return jsonify({"ok": True, "filename": bibstore.get_current_bib_filename()})
 
 
-def _page_entry_payload(row, key, global_view=False):
-    db2 = bibtexparser.bibdatabase.BibDatabase()
-    db2.entries = bibtexparser.loads(row["fields"]).entries
-    if not db2.entries:
-        db2.entries = [bibstore.get_library()._decode(row["fields"], key, row["entry_type"])]
-    raw = bibtexparser.bwriter.BibTexWriter().write(db2)
-    entry = db2.entries[0]
-    fields = {k: (v if k.lower() in _RAW_DISPLAY_FIELDS else latex_to_text(v)) if isinstance(v, str) else v
-              for k, v in entry.items()}
-    statuses, metadata = ([], {}) if global_view else _entry_statuses(key)
+def _page_entry_payload(row, key, global_view=False, metadata_entries=None, pdf_files=None):
+    parsed = BibEntry(row["fields"])
+    fields = {
+        field: value if field.lower() in _RAW_DISPLAY_FIELDS else latex_to_text(value)
+        for field, value in parsed.fields.items()
+    }
+    raw = re.sub(r"^(\s*@\w+\s*\{)[^,]+,", rf"\g<1>{key},", row["fields"].strip(), count=1)
+    metadata = {} if global_view else (metadata_entries or {}).get(key, {})
+    statuses, metadata = _entry_statuses_from_metadata(metadata)
     row_keys = row.keys()
     reference_count = row["reference_count"] if "reference_count" in row_keys else 1
     return {
         "key": key, "entry_id": row["entry_id"], "work_id": row["work_id"],
         "type": row["entry_type"], "fields": fields, "raw": raw,
-        "has_pdf": (PDF_DIR / f"{key}.pdf").exists(),
+        "has_pdf": key in (pdf_files or set()),
         "statuses": statuses, "metadata": metadata,
         "reference_count": reference_count,
         "created_at": row["created_at"], "updated_at": row["updated_at"],
@@ -431,13 +434,15 @@ def api_entries_page():
     limit = request.args.get("limit", 10, type=int)
     offset = request.args.get("offset", 0, type=int)
     database = request.args.get("database", "0") in {"1", "true", "yes"}
+    pdf_files = {path.stem for path in PDF_DIR.glob("*.pdf")}
     if database:
         rows, total = bibstore.get_library().database_page(limit, offset)
-        items = [_page_entry_payload(row, f"db:{row['entry_id']}", global_view=True) for row in rows]
+        items = [_page_entry_payload(row, f"db:{row['entry_id']}", global_view=True, pdf_files=pdf_files) for row in rows]
     else:
         filename = bibstore.get_current_bib_filename()
         rows, total = bibstore.get_library().bibliography_page(filename, limit, offset)
-        items = [_page_entry_payload(row, row["citation_key"]) for row in rows]
+        metadata_entries = load_metadata().get("entries", {})
+        items = [_page_entry_payload(row, row["citation_key"], metadata_entries=metadata_entries, pdf_files=pdf_files) for row in rows]
     return jsonify({"items": items, "total": total, "offset": offset,
                     "limit": limit, "next_offset": offset + len(items) if offset + len(items) < total else None,
                     "database": database})

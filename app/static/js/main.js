@@ -38,6 +38,7 @@ let selectedEntries = new Map();
 let databaseView = false;
 let entriesLoading = false;
 let entriesLoadError = "";
+let entriesLoadToken = 0;
 
 // Elements (set in initUI)
 let grid = null;
@@ -81,7 +82,9 @@ let toastTimer = null;
 let lastSelectedCardKey = null;
 let resizeTimer = null;
 
-const RENDER_BATCH_SIZE = 80;
+const RENDER_BATCH_SIZE = 10;
+const ENTRY_PAGE_SIZE = 10;
+const ENTRY_PAGE_CONCURRENCY = 6;
 const GRID_COLUMN_MIN_WIDTH = 260;
 const GRID_COLUMN_GAP = 12;
 
@@ -134,6 +137,7 @@ function formatTimestampLabel(value) {
 }
 
 async function loadEntries({ database = false } = {}) {
+  const loadToken = ++entriesLoadToken;
   databaseView = database;
   allEntries = [];
   filteredEntries = [];
@@ -142,21 +146,42 @@ async function loadEntries({ database = false } = {}) {
   entriesLoading = true;
   entriesLoadError = "";
   filterAndRender();
-  let offset = 0;
   try {
-    while (true) {
-      const page = await fetchEntryPage({ offset, limit: 10, database });
-      if (!page.ok) throw new Error(page.description || page.error || "Failed to load entries");
-      allEntries.push(...(page.items || []));
+    const firstPage = await fetchEntryPage({ offset: 0, limit: ENTRY_PAGE_SIZE, database });
+    if (!firstPage.ok) throw new Error(firstPage.description || firstPage.error || "Failed to load entries");
+    if (loadToken !== entriesLoadToken) return;
+    allEntries.push(...(firstPage.items || []));
+    buildIndex(allEntries);
+    filterAndRender();
+
+    const total = firstPage.total || 0;
+    let offset = firstPage.next_offset;
+    while (offset !== null && offset !== undefined && offset < total) {
+      const offsets = [];
+      for (let index = 0; index < ENTRY_PAGE_CONCURRENCY && offset + index * ENTRY_PAGE_SIZE < total; index += 1) {
+        offsets.push(offset + index * ENTRY_PAGE_SIZE);
+      }
+      const pages = await Promise.all(offsets.map((pageOffset) => fetchEntryPage({
+        offset: pageOffset,
+        limit: ENTRY_PAGE_SIZE,
+        database,
+      })));
+      if (loadToken !== entriesLoadToken) return;
+      const failed = pages.find((page) => !page.ok);
+      if (failed) throw new Error(failed.description || failed.error || "Failed to load entries");
+      for (const page of pages) {
+        allEntries.push(...(page.items || []));
+      }
       buildIndex(allEntries);
       filterAndRender();
-      if (page.next_offset === null || page.next_offset === undefined) break;
-      offset = page.next_offset;
+      offset += offsets.length * ENTRY_PAGE_SIZE;
     }
   } catch (err) {
+    if (loadToken !== entriesLoadToken) return;
     entriesLoadError = err.message || "Failed to load entries";
     throw err;
   } finally {
+    if (loadToken !== entriesLoadToken) return;
     entriesLoading = false;
     filterAndRender();
   }
@@ -2222,6 +2247,7 @@ async function openBibFilePicker() {
       }
       currentEntry = null;
       if (editor) editor.value = "";
+      closePicker();
       await loadEntries({ database: false });
       await refreshBibFileButton();
       showToast(`Switched to ${selected.id}`);
