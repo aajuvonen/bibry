@@ -19,14 +19,21 @@ The project stays deliberately simple: one local SQLite file, no accounts, and n
 * Keep bounded per-file history with restore support
 * Share identical entries between bibliographies while retaining near-identical variants
 * Switch between multiple `.bib` files in `bib/`
+* Create and safely delete bibliography projections without deleting shared database entries
+* Open the entire SQLite database and review unreferenced entries
+* Load large bibliographies progressively in small pages
 * Show DOI, URL, arXiv, and PDF links when available
 * Work reasonably well on mobile as well as desktop
+
+Entry selection supports Ctrl-click/Cmd-click for multi-selection. Outside text fields, Ctrl/Cmd+A selects all loaded entries, Ctrl/Cmd+C copies the selected BibLaTeX, Ctrl/Cmd+Z performs Undo, and Ctrl/Cmd+V opens the normal import review for clipboard BibLaTeX.
 
 Import and export both pass the resulting bibliography through the sort/dedupe routine before writing or downloading it. Small toast notifications confirm actions such as save, add, import, export, undo, and restore.
 
 ## Scan Workflows
 
 Bibry includes a `Scan` launcher in the toolbar. Scans never mutate the `.bib` file automatically. Every suggested change is reviewed first.
+
+The Scan launcher also includes **Database Orphans**, which lists database entries that are not referenced by any bibliography. Deletion requires selecting entries, confirming the count, and typing the requested confirmation text. Retaining an entry leaves it available in the global database view.
 
 ### Crossref Scan
 
@@ -155,6 +162,20 @@ To stop it:
 ```bash
 docker compose down
 ```
+
+## Updating a deployment
+
+The recommended update procedure is:
+
+```bash
+cd /path/to/bibry
+tar -czf bibry-data-backup.tgz bib pdf
+docker compose down
+git pull --ff-only origin main
+docker compose up --build -d
+```
+
+Use `--ff-only` so the deployment host never creates an accidental merge commit. If the pull refuses because of local tracked changes, inspect them rather than forcing the update. Bibry data under `bib/` and `pdf/` is intentionally ignored by Git.
 
 To rebuild after code changes:
 

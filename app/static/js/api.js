@@ -29,6 +29,12 @@ export async function fetchEntries() {
   return await res.json();
 }
 
+export async function fetchEntryPage({ offset = 0, limit = 10, database = false } = {}) {
+  const params = new URLSearchParams({ offset, limit, database: database ? "1" : "0" });
+  const res = await fetch(`/api/entries/page?${params}`);
+  return await parseResponse(res);
+}
+
 export async function fetchScanServices() {
   const res = await fetch("/api/scan/services");
   return await parseResponse(res);
@@ -141,6 +147,26 @@ export async function selectBibFile(filename) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ filename }),
   });
+  return await parseResponse(res);
+}
+
+export async function createBibFile(filename) {
+  const res = await fetch("/api/bibs/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filename }) });
+  return await parseResponse(res);
+}
+
+export async function deleteBibFile(filename, confirmation) {
+  const res = await fetch("/api/bibs/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filename, confirmation }) });
+  return await parseResponse(res);
+}
+
+export async function editDatabaseEntry(entryId, raw) {
+  const res = await fetch(`/api/database/entry/${encodeURIComponent(entryId)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ raw }) });
+  return await parseResponse(res);
+}
+
+export async function deleteDatabaseOrphans(entryIds, confirmation) {
+  const res = await fetch("/api/scan/database-orphans/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entry_ids: entryIds, confirmation }) });
   return await parseResponse(res);
 }
 

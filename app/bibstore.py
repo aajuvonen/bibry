@@ -1,6 +1,8 @@
 # app/bibstore.py
 import bibtexparser
 import json
+import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,7 +45,7 @@ def ensure_bib_dirs():
 
 def _safe_bib_name(filename):
     name = Path(filename).name
-    if not name.endswith(".bib"):
+    if not name.endswith(".bib") or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._ -]*\.bib", name):
         raise ValueError("Bib filename must end with .bib")
     return name
 
@@ -118,17 +120,41 @@ def set_last_bib_state(value):
 def list_bib_files():
     items = []
     current = get_current_bib_filename()
+    stats = {item["filename"]: item for item in get_library().bibliography_stats()}
     for path in get_available_bib_paths():
         stat = path.stat()
-        text = path.read_text(encoding="utf-8")
+        db_item = stats.get(path.name, {})
         items.append({
             "filename": path.name,
             "selected": path.name == current,
-            "entry_count": _entry_count(text),
-            "created_at": datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
-            "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            "entry_count": db_item.get("entry_count", 0),
+            "created_at": db_item.get("created_at") or datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            "modified_at": db_item.get("updated_at") or datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
         })
     return items
+
+
+def create_bib_file(filename):
+    name = _safe_bib_name(filename)
+    path = BIB_DIR / name
+    if path.exists():
+        raise FileExistsError(name)
+    get_library().create_bibliography(name)
+    path.write_text("", encoding="utf-8")
+    return name
+
+
+def delete_bib_file(filename):
+    name = _safe_bib_name(filename)
+    was_current = name == get_current_bib_filename()
+    get_library().delete_bibliography(name)
+    (BIB_DIR / name).unlink(missing_ok=True)
+    shutil.rmtree(HISTORY_ROOT / name, ignore_errors=True)
+    (BIB_DIR / "metadata" / f"{name}.json").unlink(missing_ok=True)
+    if was_current:
+        remaining = sorted(BIB_DIR.glob("*.bib"))
+        if remaining:
+            ACTIVE_BIB.write_text(remaining[0].name, encoding="utf-8")
 
 
 def get_bib_signature():

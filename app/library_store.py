@@ -177,6 +177,95 @@ class LibraryStore:
             result.append(self._decode(row["fields"], row["citation_key"], row["entry_type"]))
         return result
 
+    def bibliography_page(self, filename, limit=10, offset=0):
+        limit = max(1, min(int(limit or 10), 100))
+        offset = max(0, int(offset or 0))
+        with self.session() as db:
+            total = db.execute("""SELECT COUNT(*) FROM bibliography_entries m
+              JOIN bibliographies b ON b.id=m.bibliography_id WHERE b.filename=?""", (filename,)).fetchone()[0]
+            rows = db.execute("""SELECT e.fields, e.entry_type, e.id entry_id,
+              e.work_id, e.created_at, e.updated_at, m.citation_key, m.position
+              FROM bibliography_entries m JOIN bibliographies b ON b.id=m.bibliography_id
+              JOIN entries e ON e.id=m.entry_id WHERE b.filename=?
+              ORDER BY m.position, m.citation_key LIMIT ? OFFSET ?""",
+                              (filename, limit, offset)).fetchall()
+        return rows, total
+
+    def database_page(self, limit=10, offset=0):
+        limit = max(1, min(int(limit or 10), 100))
+        offset = max(0, int(offset or 0))
+        with self.session() as db:
+            total = db.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+            rows = db.execute("""SELECT e.fields, e.entry_type, e.id entry_id,
+              e.work_id, e.created_at, e.updated_at, COUNT(m.bibliography_id) reference_count
+              FROM entries e LEFT JOIN bibliography_entries m ON m.entry_id=e.id
+              GROUP BY e.id ORDER BY e.id LIMIT ? OFFSET ?""", (limit, offset)).fetchall()
+        return rows, total
+
+    def bibliography_stats(self):
+        with self.session() as db:
+            rows = db.execute("""SELECT b.filename, b.created_at, b.updated_at,
+              COUNT(m.citation_key) entry_count
+              FROM bibliographies b LEFT JOIN bibliography_entries m ON m.bibliography_id=b.id
+              GROUP BY b.id ORDER BY b.filename""").fetchall()
+        return [dict(row) for row in rows]
+
+    def database_stats(self):
+        with self.session() as db:
+            row = db.execute("SELECT COUNT(*) entry_count, MIN(created_at) created_at, MAX(updated_at) updated_at FROM entries").fetchone()
+        return dict(row)
+
+    def create_bibliography(self, filename):
+        with self.session() as db:
+            if db.execute("SELECT 1 FROM bibliographies WHERE filename=?", (filename,)).fetchone():
+                raise FileExistsError(filename)
+            self._bibliography(db, filename)
+
+    def delete_bibliography(self, filename):
+        with self.session() as db:
+            row = db.execute("SELECT id FROM bibliographies WHERE filename=?", (filename,)).fetchone()
+            if not row:
+                raise FileNotFoundError(filename)
+            count = db.execute("SELECT COUNT(*) FROM bibliographies").fetchone()[0]
+            if count <= 1:
+                raise ValueError("The final bibliography cannot be deleted")
+            db.execute("DELETE FROM bibliographies WHERE id=?", (row["id"],))
+
+    def delete_orphan_entries(self, entry_ids):
+        entry_ids = [int(value) for value in entry_ids]
+        if not entry_ids:
+            return 0
+        with self.session() as db:
+            placeholders = ",".join("?" for _ in entry_ids)
+            rows = db.execute(f"""SELECT e.id FROM entries e
+              LEFT JOIN bibliography_entries m ON m.entry_id=e.id
+              WHERE e.id IN ({placeholders}) GROUP BY e.id HAVING COUNT(m.bibliography_id)=0""", entry_ids).fetchall()
+            ids = [row["id"] for row in rows]
+            if ids:
+                marks = ",".join("?" for _ in ids)
+                db.execute(f"DELETE FROM entries WHERE id IN ({marks})", ids)
+        return len(ids)
+
+    def orphan_entries(self):
+        with self.session() as db:
+            return db.execute("""SELECT e.id entry_id, e.work_id, e.fields, e.entry_type,
+              e.created_at, e.updated_at FROM entries e
+              LEFT JOIN bibliography_entries m ON m.entry_id=e.id
+              GROUP BY e.id HAVING COUNT(m.bibliography_id)=0 ORDER BY e.id""").fetchall()
+
+    def update_entry_globally(self, entry_id, entry):
+        raw = self._encode(entry)
+        signature = _signature(entry)
+        with self.session() as db:
+            existing = db.execute("SELECT id FROM entries WHERE signature=? AND id<>?", (signature, entry_id)).fetchone()
+            if existing:
+                raise FileExistsError("An identical database entry already exists")
+            db.execute("UPDATE entries SET entry_type=?, fields=?, signature=?, updated_at=? WHERE id=?",
+                       (entry.get("ENTRYTYPE", "misc"), raw, signature, _utc_now(), entry_id))
+            rows = db.execute("""SELECT DISTINCT b.filename FROM bibliography_entries m
+              JOIN bibliographies b ON b.id=m.bibliography_id WHERE m.entry_id=?""", (entry_id,)).fetchall()
+        return [row["filename"] for row in rows]
+
     def memberships_for(self, filename):
         with self.session() as db:
             rows = db.execute("""SELECT m.citation_key, e.id entry_id, e.work_id, e.signature

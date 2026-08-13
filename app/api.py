@@ -361,7 +361,33 @@ def api_version():
 
 @api_bp.route("/bibs")
 def api_bibs():
-    return jsonify({"items": bibstore.list_bib_files()})
+    return jsonify({"items": bibstore.list_bib_files(), "database": bibstore.get_library().database_stats()})
+
+
+@api_bp.route("/bibs/create", methods=["POST"])
+def api_create_bib():
+    try:
+        name = bibstore.create_bib_file((request.json or {}).get("filename", ""))
+    except FileExistsError:
+        abort(409, "Bib file already exists")
+    except ValueError as exc:
+        abort(400, str(exc))
+    return jsonify({"ok": True, "filename": name}), 201
+
+
+@api_bp.route("/bibs/delete", methods=["POST"])
+def api_delete_bib():
+    payload = request.json or {}
+    filename = payload.get("filename", "")
+    if payload.get("confirmation") != filename:
+        abort(400, "Type the exact filename to confirm deletion")
+    try:
+        bibstore.delete_bib_file(filename)
+    except FileNotFoundError:
+        abort(404, "Bib file not found")
+    except ValueError as exc:
+        abort(400, str(exc))
+    return jsonify({"ok": True, "filename": filename})
 
 
 @api_bp.route("/bibs/select", methods=["POST"])
@@ -376,6 +402,45 @@ def api_select_bib():
     except ValueError as exc:
         abort(400, str(exc))
     return jsonify({"ok": True, "filename": bibstore.get_current_bib_filename()})
+
+
+def _page_entry_payload(row, key, global_view=False):
+    db2 = bibtexparser.bibdatabase.BibDatabase()
+    db2.entries = bibtexparser.loads(row["fields"]).entries
+    if not db2.entries:
+        db2.entries = [bibstore.get_library()._decode(row["fields"], key, row["entry_type"])]
+    raw = bibtexparser.bwriter.BibTexWriter().write(db2)
+    entry = db2.entries[0]
+    fields = {k: (v if k.lower() in _RAW_DISPLAY_FIELDS else latex_to_text(v)) if isinstance(v, str) else v
+              for k, v in entry.items()}
+    statuses, metadata = ([], {}) if global_view else _entry_statuses(key)
+    row_keys = row.keys()
+    reference_count = row["reference_count"] if "reference_count" in row_keys else 1
+    return {
+        "key": key, "entry_id": row["entry_id"], "work_id": row["work_id"],
+        "type": row["entry_type"], "fields": fields, "raw": raw,
+        "has_pdf": (PDF_DIR / f"{key}.pdf").exists(),
+        "statuses": statuses, "metadata": metadata,
+        "reference_count": reference_count,
+        "created_at": row["created_at"], "updated_at": row["updated_at"],
+    }
+
+
+@api_bp.route("/entries/page")
+def api_entries_page():
+    limit = request.args.get("limit", 10, type=int)
+    offset = request.args.get("offset", 0, type=int)
+    database = request.args.get("database", "0") in {"1", "true", "yes"}
+    if database:
+        rows, total = bibstore.get_library().database_page(limit, offset)
+        items = [_page_entry_payload(row, f"db:{row['entry_id']}", global_view=True) for row in rows]
+    else:
+        filename = bibstore.get_current_bib_filename()
+        rows, total = bibstore.get_library().bibliography_page(filename, limit, offset)
+        items = [_page_entry_payload(row, row["citation_key"]) for row in rows]
+    return jsonify({"items": items, "total": total, "offset": offset,
+                    "limit": limit, "next_offset": offset + len(items) if offset + len(items) < total else None,
+                    "database": database})
 
 # Endpoint: list all entries (with metadata)
 @api_bp.route("/entries")
@@ -409,6 +474,24 @@ def api_entry(key):
     db2.entries = [entry]
     writer = bibtexparser.bwriter.BibTexWriter()
     return jsonify({"raw": writer.write(db2)})
+
+
+@api_bp.route("/database/entry/<int:entry_id>", methods=["POST"])
+def api_database_entry_edit(entry_id):
+    raw = (request.json or {}).get("raw", "")
+    if not raw.strip():
+        abort(400, "Database entries cannot be empty")
+    parser = bibtexparser.bparser.BibTexParser(common_strings=True)
+    parsed = bibtexparser.loads(raw, parser=parser)
+    if len(parsed.entries) != 1:
+        abort(400, "Exactly one BibLaTeX entry is required")
+    try:
+        filenames = bibstore.get_library().update_entry_globally(entry_id, parsed.entries[0])
+    except FileExistsError as exc:
+        abort(409, str(exc))
+    for filename in filenames:
+        bibstore.get_library().refresh_projection(filename, bibstore.BIB_DIR / filename)
+    return jsonify({"ok": True, "entry_id": entry_id, "updated_bibliographies": filenames})
 
 
 @api_bp.route("/entry/<key>/variants")
@@ -825,6 +908,18 @@ def api_scan_clear_rejections():
     phase = request.json.get("phase") or ""
     cleared = clear_suppressions(phase_prefix=phase or None)
     return jsonify({"ok": True, "cleared": cleared})
+
+
+@api_bp.route("/scan/database-orphans/delete", methods=["POST"])
+def api_delete_database_orphans():
+    payload = request.json or {}
+    entry_ids = payload.get("entry_ids", [])
+    if not isinstance(entry_ids, list) or not entry_ids:
+        abort(400, "No database orphan entries selected")
+    if payload.get("confirmation") != f"DELETE {len(entry_ids)}":
+        abort(400, "Type the exact deletion confirmation")
+    deleted = bibstore.get_library().delete_orphan_entries(entry_ids)
+    return jsonify({"ok": True, "deleted": deleted})
 
 
 @api_bp.route("/scan/orphans/action", methods=["POST"])

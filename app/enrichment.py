@@ -992,11 +992,38 @@ class PdfOrphanScanner:
         return {"items": items, "counts": counts, "scope": "global-catalogue"}
 
 
+class DatabaseOrphanScanner:
+    service_name = "database-orphans"
+    display_name = "Database Orphans"
+    phase_name = "phase5_database_orphans"
+
+    def availability(self):
+        return {"available": True, "reason": "Finds database entries not referenced by any bibliography."}
+
+    def scan_entries(self, entries_by_key=None):
+        items = []
+        for row in bibstore.get_library().orphan_entries():
+            entry = bibstore.get_library()._decode(row["fields"], f"db:{row['entry_id']}", row["entry_type"])
+            items.append({
+                "id": f"{self.phase_name}:{row['entry_id']}",
+                "phase": self.phase_name, "service": self.service_name,
+                "key": entry.get("ID"), "entry_id": row["entry_id"],
+                "title": _clean_text(entry.get("title")),
+                "type": (entry.get("ENTRYTYPE") or "misc").lower(),
+                "summary": " • ".join(filter(None, [_clean_text(entry.get("author") or entry.get("editor")), _clean_text(entry.get("year"))])),
+                "raw": bibstore.get_library()._encode(entry),
+                "reference_count": 0,
+                "created_at": row["created_at"], "updated_at": row["updated_at"],
+            })
+        return {"items": items, "count": len(items), "scope": "global-catalogue"}
+
+
 SCAN_SERVICES = {
     CrossrefScanner.service_name: CrossrefScanner(),
     WorldCatScanner.service_name: WorldCatScanner(),
     PdfCoverageScanner.service_name: PdfCoverageScanner(),
     PdfOrphanScanner.service_name: PdfOrphanScanner(),
+    DatabaseOrphanScanner.service_name: DatabaseOrphanScanner(),
 }
 
 

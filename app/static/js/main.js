@@ -3,6 +3,7 @@
 
 import {
   fetchEntries,
+  fetchEntryPage,
   fetchScanServices,
   runScan,
   startScanJob,
@@ -22,6 +23,10 @@ import {
   exportEntries as requestExportEntries,
   fetchHistory,
   restoreHistory,
+  createBibFile,
+  deleteBibFile,
+  editDatabaseEntry,
+  deleteDatabaseOrphans,
 } from "./api.js";
 import { buildIndex, applyFilters } from "./filters.js";
 import { createCard, createStatusIcons, getIconClass, extractLatexUrl } from "./renderer.js";
@@ -29,6 +34,10 @@ import { createCard, createStatusIcons, getIconClass, extractLatexUrl } from "./
 let allEntries = [];
 let filteredEntries = [];
 let currentEntry = null;
+let selectedEntries = new Map();
+let databaseView = false;
+let entriesLoading = false;
+let entriesLoadError = "";
 
 // Elements (set in initUI)
 let grid = null;
@@ -124,10 +133,33 @@ function formatTimestampLabel(value) {
   return absolute || relative || value || "";
 }
 
-async function loadEntries() {
-  allEntries = await fetchEntries();
-  buildIndex(allEntries);
+async function loadEntries({ database = false } = {}) {
+  databaseView = database;
+  allEntries = [];
+  filteredEntries = [];
+  selectedEntries.clear();
+  currentEntry = null;
+  entriesLoading = true;
+  entriesLoadError = "";
   filterAndRender();
+  let offset = 0;
+  try {
+    while (true) {
+      const page = await fetchEntryPage({ offset, limit: 10, database });
+      if (!page.ok) throw new Error(page.description || page.error || "Failed to load entries");
+      allEntries.push(...(page.items || []));
+      buildIndex(allEntries);
+      filterAndRender();
+      if (page.next_offset === null || page.next_offset === undefined) break;
+      offset = page.next_offset;
+    }
+  } catch (err) {
+    entriesLoadError = err.message || "Failed to load entries";
+    throw err;
+  } finally {
+    entriesLoading = false;
+    filterAndRender();
+  }
 }
 
 async function refreshBibFileButton() {
@@ -258,7 +290,7 @@ function updatePickerInfo() {
     renderPickerExtras();
   }
   if (pickerState.singleSelect) {
-    info.textContent = selectedCount ? "1 selected" : "No selection";
+    info.textContent = "";
     return;
   }
   info.textContent = `${selectedCount} selected`;
@@ -755,6 +787,15 @@ function scanExtraActions() {
       onClick: async () => await startScanFromModal(orphanService),
     });
   }
+  const databaseOrphanService = scanState.services.find((service) => service.name === "database-orphans");
+  if (databaseOrphanService) {
+    actions.push({
+      label: databaseOrphanService.label || "Database Orphans",
+      className: "btn btn-sm btn-outline-danger",
+      disabled: scanState.running,
+      onClick: async () => await startScanFromModal(databaseOrphanService),
+    });
+  }
   actions.push({
     label: "Stop",
     className: "btn btn-sm btn-outline-danger",
@@ -1084,12 +1125,26 @@ function renderEmptyState(container) {
   if (!container) return;
   container.classList.add("view-empty");
   const hasQuery = Boolean((searchInput ? searchInput.value : "").trim());
-  const message = allEntries.length === 0
+  const message = entriesLoading
+    ? "Loading entries…"
+    : entriesLoadError
+      ? entriesLoadError
+      : allEntries.length === 0
     ? "This bibliography is empty."
     : hasQuery
       ? "No entries match the current search."
       : "No entries to display.";
   container.innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
+}
+
+function renderLoadingFooter(container) {
+  if (!container) return;
+  container.querySelectorAll(".entries-loading-footer").forEach((node) => node.remove());
+  if (!entriesLoading && !entriesLoadError) return;
+  const footer = document.createElement("div");
+  footer.className = "entries-loading-footer text-muted small text-center p-2";
+  footer.textContent = entriesLoadError || `Loading entries… ${allEntries.length} loaded`;
+  container.appendChild(footer);
 }
 
 function clearEmptyState(container) {
@@ -1135,9 +1190,10 @@ function renderGrid() {
   const columns = buildGridColumns();
   renderGridInBatches(filteredEntries, columns, token, (e) => {
     const card = createCard(e);
-    card.addEventListener("click", () => selectEntry(e));
+    card.addEventListener("click", (event) => selectEntry(e, event));
     return card;
   });
+  renderLoadingFooter(grid);
 }
 
 function renderList() {
@@ -1158,6 +1214,7 @@ function renderList() {
   }
   const token = ++renderToken;
   renderInBatches(filteredEntries, list, token, createListEntry);
+  renderLoadingFooter(list);
 }
 
 function renderInBatches(entries, container, token, buildNode) {
@@ -1174,6 +1231,7 @@ function renderInBatches(entries, container, token, buildNode) {
     }
 
     container.appendChild(frag);
+    renderLoadingFooter(container);
     updateSelectedCardState();
 
     if (index < entries.length) {
@@ -1272,6 +1330,7 @@ function createListEntry(entry) {
 
   const div = document.createElement("div");
   div.className = "mb-2";
+  div.dataset.entryKey = entry.key || "";
 
   const iconSpan = document.createElement("span");
   iconSpan.className = "text-muted small me-1";
@@ -1338,7 +1397,7 @@ function createListEntry(entry) {
   if (actions.children.length > 0)
     div.appendChild(actions)
 
-  div.addEventListener("click", () => selectEntry(entry));
+  div.addEventListener("click", (event) => selectEntry(entry, event));
 
   return div;
 }
@@ -1351,34 +1410,42 @@ function cleanLatex(s = "") {
     .trim();
 }
 
-function selectEntry(entry) {
-  currentEntry = entry;
-  if (editor) editor.value = entry.raw || "";
+function updateEditorForSelection() {
+  const entries = [...selectedEntries.values()];
+  currentEntry = entries.length === 1 ? entries[0] : null;
+  if (editor) editor.value = entries.map((entry) => entry.raw || "").join("\n\n");
+  const multi = entries.length > 1;
+  ["saveBtn", "addBtn", "cancelBtn", "undoBtn"].forEach((id) => {
+    const button = getEl(id);
+    if (button) button.disabled = multi;
+  });
+  if (editor) editor.readOnly = multi;
+}
+
+function selectEntry(entry, event = null) {
+  const additive = Boolean(event?.ctrlKey || event?.metaKey);
+  if (additive) {
+    if (selectedEntries.has(entry.entry_id || entry.key)) selectedEntries.delete(entry.entry_id || entry.key);
+    else selectedEntries.set(entry.entry_id || entry.key, entry);
+  } else {
+    selectedEntries.clear();
+    selectedEntries.set(entry.entry_id || entry.key, entry);
+  }
+  updateEditorForSelection();
   updateSelectedCardState();
 }
 
 function updateSelectedCardState() {
-  if (!grid) return;
-  const selectedKey = currentEntry ? currentEntry.key : null;
-  if (lastSelectedCardKey === selectedKey) {
-    const existing = selectedKey ? grid.querySelector(`.bib-card[data-entry-key="${escapeSelector(selectedKey)}"]`) : null;
-    if (selectedKey && existing) return;
-  }
-
-  if (lastSelectedCardKey) {
-    const previous = grid.querySelector(`.bib-card[data-entry-key="${escapeSelector(lastSelectedCardKey)}"]`);
-    previous?.classList.remove("is-selected");
-  }
-  if (selectedKey) {
-    const next = grid.querySelector(`.bib-card[data-entry-key="${escapeSelector(selectedKey)}"]`);
-    next?.classList.add("is-selected");
-  }
-  lastSelectedCardKey = selectedKey;
+  const selected = new Set([...selectedEntries.values()].map((entry) => entry.key));
+  document.querySelectorAll("[data-entry-key]").forEach((node) => {
+    node.classList.toggle("is-selected", selected.has(node.dataset.entryKey));
+  });
+  lastSelectedCardKey = currentEntry ? currentEntry.key : null;
 }
 
 async function saveEntry() {
   try {
-    if (!currentEntry) return;
+    if (!currentEntry || selectedEntries.size !== 1) return;
 
     const previousKey = currentEntry.key;
     const raw = editor ? editor.value.trim() : "";
@@ -1387,24 +1454,16 @@ async function saveEntry() {
       if (!confirmed) return;
     }
 
-    const res = await fetch(`/api/entry/${currentEntry.key}`, {
+    const res = databaseView
+      ? await editDatabaseEntry(currentEntry.entry_id, raw)
+      : await fetch(`/api/entry/${currentEntry.key}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ raw }),
     });
-    if (!res.ok) {
-      const message = await res.text();
-      throw new Error(message || "Failed to save entry");
-    }
-
-    const data = await res.json().catch(() => ({}));
-    await loadEntries();
-    currentEntry = findEntryByKey(data.key || previousKey);
-    if (currentEntry && editor) {
-      editor.value = currentEntry.raw || "";
-    } else if (editor && raw === "") {
-      editor.value = "";
-    }
+    const data = res instanceof Response ? await res.json().catch(() => ({})) : res;
+    if (!res.ok) throw new Error(data.description || data.error || "Failed to save entry");
+    await loadEntries({ database: databaseView });
     if (data.deleted) {
       showToast(`Deleted ${previousKey}`);
     } else {
@@ -1417,7 +1476,7 @@ async function saveEntry() {
 }
 
 function cancelEdit() {
-  if (currentEntry && editor) editor.value = currentEntry.raw || "";
+  updateEditorForSelection();
 }
 
 async function addEntry() {
@@ -1438,7 +1497,7 @@ async function addEntry() {
       throw new Error(data.description || data.error || "Failed to add entry");
     }
 
-    await loadEntries();
+    await loadEntries({ database: databaseView });
     currentEntry = findEntryByKey(data.key);
     if (currentEntry && editor) {
       editor.value = currentEntry.raw || "";
@@ -1455,7 +1514,7 @@ async function handleUndo() {
     const res = await undoLast();
     if (res && res.ok) {
       const selectedKey = currentEntry ? currentEntry.key : null;
-      await loadEntries();
+      await loadEntries({ database: databaseView });
       currentEntry = selectedKey ? findEntryByKey(selectedKey) : null;
       if (editor) {
         editor.value = currentEntry ? currentEntry.raw || "" : "";
@@ -1472,8 +1531,9 @@ async function handleUndo() {
 }
 
 function copyCurrent() {
-  if (!currentEntry) return;
-  navigator.clipboard.writeText(currentEntry.raw || "");
+  const entries = [...selectedEntries.values()];
+  if (!entries.length) return;
+  navigator.clipboard.writeText(entries.map((entry) => entry.raw || "").join("\n\n"));
 }
 
 function pickerMeta(titleParts) {
@@ -1549,6 +1609,40 @@ function buildScanReviewItems(items) {
   }));
 }
 
+function openDatabaseOrphanPicker(result) {
+  const items = buildScanReviewItems(result.items || []).map((item) => ({
+    ...item,
+    badge: "Unreferenced",
+    meta: pickerMeta([item.meta, "not used by any bibliography"]),
+  }));
+  openPicker({
+    mode: "database-orphans",
+    title: "Database Orphans",
+    subtitle: "These entries are not referenced by any bibliography.",
+    confirmText: "Delete Selected",
+    emptyMessage: "No orphan database entries found.",
+    items,
+    singleSelect: false,
+    actions: [{
+      label: "Delete Selected",
+      className: "btn btn-sm btn-danger",
+      onClick: async () => {
+        const selected = pickerState.items.filter((item) => item.selected);
+        if (!selected.length) throw new Error("Select at least one orphan entry");
+        const confirmed = await showConfirmDialog("Delete Database Entries", `Delete ${selected.length} unreferenced database entries?`, "Continue", "btn-danger");
+        if (!confirmed) return;
+        const typed = window.prompt(`Type DELETE ${selected.length} to confirm:`);
+        if (typed !== `DELETE ${selected.length}`) throw new Error("Deletion cancelled");
+        const response = await deleteDatabaseOrphans(selected.map((item) => item.entry_id), typed);
+        if (!response.ok) throw new Error(response.description || response.error || "Failed to delete database orphans");
+        closePicker();
+        showToast(`Deleted ${response.deleted || selected.length} orphan entries`);
+      },
+    }],
+    onConfirm: async () => closePicker(),
+  });
+}
+
 function buildExportItems() {
   return allEntries.map((entry) => ({
     id: `export-${entry.key}`,
@@ -1616,8 +1710,20 @@ function buildHistoryItems(items) {
   }));
 }
 
-function buildBibFileItems(items) {
-  return items.map((item) => ({
+function buildBibFileItems(items, database = {}) {
+  return [{
+    id: "__database__",
+    key: "Entire Database",
+    title: "Entire Database",
+    meta: pickerMeta([
+      `${database.entry_count || 0} entries`,
+      database.created_at ? `created ${formatTimestampLabel(database.created_at)}` : "",
+      database.updated_at ? `updated ${formatTimestampLabel(database.updated_at)}` : "",
+    ]),
+    badge: "Database",
+    selected: false,
+    searchText: "entire database database",
+  }, ...items.map((item) => ({
     id: item.filename,
     key: item.filename,
     title: item.filename,
@@ -1631,7 +1737,7 @@ function buildBibFileItems(items) {
     searchText: [item.filename, item.entry_count, item.created_at, item.modified_at]
       .join(" ")
       .toLowerCase(),
-  }));
+  }))];
 }
 
 function scanReviewActions() {
@@ -1644,7 +1750,7 @@ function scanReviewActions() {
         if (!applyRes.ok) {
           throw new Error(applyRes.description || applyRes.error || "Failed to apply patch");
         }
-        await loadEntries();
+        await loadEntries({ database: databaseView });
         currentEntry = findEntryByKey(applyRes.key || selected.key);
         if (currentEntry && editor) {
           editor.value = currentEntry.raw || "";
@@ -1741,6 +1847,12 @@ async function startScanFromModal(service) {
     const res = await runScan(service.name);
     if (!res.ok) throw new Error(res.description || res.error || "Orphan scan failed");
     openOrphanPdfModal(res);
+    return;
+  }
+  if (service.name === "database-orphans") {
+    const res = await runScan(service.name);
+    if (!res.ok) throw new Error(res.description || res.error || "Database orphan scan failed");
+    openDatabaseOrphanPicker(res);
     return;
   }
 
@@ -1962,7 +2074,7 @@ async function runImport(file) {
       if (!res.ok) {
         throw new Error(res.description || res.error || "Import failed");
       }
-      await loadEntries();
+      await loadEntries({ database: databaseView });
       showToast(formatImportToast(res.imported_count || 0, res.updated_count || 0));
     },
   });
@@ -2033,7 +2145,7 @@ async function openHistoryPicker() {
         throw new Error(restoreRes.description || restoreRes.error || "Restore failed");
       }
       const selectedKey = currentEntry ? currentEntry.key : null;
-      await loadEntries();
+      await loadEntries({ database: databaseView });
       currentEntry = selectedKey ? findEntryByKey(selectedKey) : null;
       if (editor) {
         editor.value = currentEntry ? currentEntry.raw || "" : "";
@@ -2052,20 +2164,60 @@ async function openBibFilePicker() {
   openPicker({
     mode: "bib-file",
     title: "Select Bib File",
-    subtitle: "Choose the active bibliography from bib/.",
+    subtitle: "Choose a bibliography or inspect the entire database.",
     confirmText: "Use File",
     emptyMessage: "No bib files found in bib/.",
-    items: buildBibFileItems(res.items || []),
+    items: buildBibFileItems(res.items || [], res.database || {}),
     singleSelect: true,
+    actions: [
+      {
+        label: "Create Bib File",
+        requiresSelection: false,
+        className: "btn btn-sm btn-success",
+        onClick: async () => {
+          const filename = window.prompt("New bibliography filename (without or with .bib):", "new.bib");
+          if (!filename) return;
+          const createRes = await createBibFile(filename.endsWith(".bib") ? filename : `${filename}.bib`);
+          if (!createRes.ok) throw new Error(createRes.description || createRes.error || "Failed to create bib file");
+          await refreshBibFileButton();
+          await openBibFilePicker();
+          showToast(`Created ${createRes.filename}`);
+        },
+      },
+      {
+        label: "Delete Selected File",
+        className: "btn btn-sm btn-outline-danger",
+        onClick: async (selected) => {
+          if (!selected || selected.id === "__database__") throw new Error("Select an ordinary bib file first");
+          const confirmed = await showConfirmDialog("Delete Bibliography", `This removes ${selected.id} and its local history, but not database entries. Continue?`, "Continue", "btn-danger");
+          if (!confirmed) return;
+          const typed = window.prompt(`Type ${selected.id} to permanently delete it:`);
+          if (typed !== selected.id) throw new Error("Deletion cancelled: filename did not match");
+          const deleteRes = await deleteBibFile(selected.id, typed);
+          if (!deleteRes.ok) throw new Error(deleteRes.description || deleteRes.error || "Failed to delete bib file");
+          closePicker();
+          await refreshBibFileButton();
+          await openBibFilePicker();
+          showToast(`Deleted ${selected.id}`);
+        },
+      },
+    ],
     onConfirm: async (selectedItems) => {
       const [selected] = selectedItems;
+      if (selected.id === "__database__") {
+        await loadEntries({ database: true });
+        if (editor) editor.value = "";
+        closePicker();
+        showToast("Viewing entire database");
+        return;
+      }
       const selectRes = await selectBibFile(selected.id);
       if (!selectRes.ok) {
         throw new Error(selectRes.description || selectRes.error || "Failed to switch bib file");
       }
       currentEntry = null;
       if (editor) editor.value = "";
-      await loadEntries();
+      await loadEntries({ database: false });
       await refreshBibFileButton();
       showToast(`Switched to ${selected.id}`);
     },
@@ -2199,7 +2351,7 @@ function initUI() {
         }
         pdfCoverageState.counts = counts;
         renderPdfCoverageList();
-        await loadEntries();
+        await loadEntries({ database: databaseView });
         showToast(`Attached PDF for ${key}`);
       } catch (err) {
         console.error("PDF attach failed:", err);
@@ -2284,6 +2436,33 @@ function initUI() {
   });
 
   document.addEventListener("keydown", (event) => {
+    const editingTarget = ["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName);
+    const modifier = event.ctrlKey || event.metaKey;
+    if (modifier && !editingTarget && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      selectedEntries = new Map(allEntries.map((entry) => [entry.entry_id || entry.key, entry]));
+      updateEditorForSelection();
+      updateSelectedCardState();
+      return;
+    }
+    if (modifier && !editingTarget && event.key.toLowerCase() === "z") {
+      event.preventDefault();
+      handleUndo();
+      return;
+    }
+    if (modifier && !editingTarget && event.key.toLowerCase() === "c") {
+      event.preventDefault();
+      copyCurrent();
+      return;
+    }
+    if (modifier && !editingTarget && event.key.toLowerCase() === "v") {
+      event.preventDefault();
+      navigator.clipboard?.readText().then((text) => {
+        if (!text?.trim()) throw new Error("Clipboard is empty");
+        return runImport(new File([text], "clipboard.bib", { type: "text/x-bibtex" }));
+      }).catch((err) => showMessageDialog("Paste Import Failed", formatUiError(err, "Clipboard does not contain readable BibLaTeX entries")));
+      return;
+    }
     if (event.key === "Escape" && getEl("dialogBackdrop")?.classList.contains("open")) {
       closeDialog(false);
       return;
@@ -2294,6 +2473,10 @@ function initUI() {
     }
     if (event.key === "Escape" && getEl("pdfCoverageBackdrop")?.classList.contains("open")) {
       closePdfCoverageModal();
+      return;
+    }
+    if (event.key === "Escape" && pickerState?.mode === "database-orphans") {
+      closePicker();
     }
   });
 
@@ -2340,8 +2523,8 @@ function initUI() {
 
 document.addEventListener("DOMContentLoaded", () => {
   initUI();
-  Promise.all([loadEntries(), refreshBibFileButton()]).catch((err) => {
-    console.error("Failed to load entries:", err);
-    showMessageDialog("Load Failed", formatUiError(err, "Failed to load bibliography"));
+  refreshBibFileButton().then(() => openBibFilePicker()).catch((err) => {
+    console.error("Failed to open bibliography selector:", err);
+    showMessageDialog("Load Failed", formatUiError(err, "Failed to load bibliography selector"));
   });
 });
