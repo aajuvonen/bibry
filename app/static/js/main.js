@@ -27,6 +27,8 @@ import {
   deleteBibFile,
   editDatabaseEntry,
   deleteDatabaseOrphans,
+  searchLibraryEntries,
+  addLibraryEntry,
 } from "./api.js";
 import { buildIndex, applyFilters } from "./filters.js";
 import { createCard, createStatusIcons, getIconClass, extractLatexUrl } from "./renderer.js";
@@ -75,6 +77,11 @@ let orphanPdfState = { items: [], counts: {} };
 let exportState = {
   format: "bib",
   htmlView: "list",
+};
+let libraryAddState = {
+  queryToken: 0,
+  searchTimer: null,
+  citationKey: "",
 };
 let dialogResolver = null;
 let dragDepth = 0;
@@ -139,6 +146,7 @@ function formatTimestampLabel(value) {
 async function loadEntries({ database = false } = {}) {
   const loadToken = ++entriesLoadToken;
   databaseView = database;
+  refreshLibraryAddToolbar();
   allEntries = [];
   filteredEntries = [];
   selectedEntries.clear();
@@ -223,6 +231,13 @@ function refreshScanToolbarButton() {
   }
 }
 
+function refreshLibraryAddToolbar() {
+  const button = getEl("libraryAddToolbarBtn");
+  if (!button) return;
+  button.disabled = databaseView;
+  button.title = databaseView ? "Select a bib file before adding a global library entry" : "Search the global library and add an entry";
+}
+
 function setScanEditLock(locked) {
   const editorEl = getEl("editRaw");
   if (editorEl) editorEl.readOnly = locked;
@@ -300,6 +315,7 @@ function formatUiError(err, fallback = "Action failed") {
 
 function filteredPickerItems() {
   if (!pickerState) return [];
+  if (pickerState.remoteSearch) return pickerState.items;
   const query = pickerState.query.trim().toLowerCase();
   if (!query) return pickerState.items;
   return pickerState.items.filter((item) => item.searchText.includes(query));
@@ -632,6 +648,7 @@ function renderPickerList() {
         }
       }
       item.selected = checkbox.checked;
+      pickerState?.onSelectionChange?.(item, checkbox.checked);
       renderPickerList();
     });
 
@@ -719,6 +736,27 @@ function renderPickerExtras() {
       });
       extra.appendChild(group);
       return;
+    }
+
+    if (action.type === "input") {
+      const wrapper = document.createElement("label");
+      wrapper.className = "d-flex align-items-center gap-2 small";
+      if (action.label) {
+        const label = document.createElement("span");
+        label.textContent = action.label;
+        wrapper.appendChild(label);
+      }
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = action.className || "form-control form-control-sm";
+      input.placeholder = action.placeholder || "";
+      input.value = action.value || "";
+      input.disabled = Boolean(action.disabled);
+      input.autocomplete = "off";
+      input.addEventListener("input", (event) => action.onInput?.(event.target.value));
+      wrapper.appendChild(input);
+      extra.appendChild(wrapper);
+      continue;
     }
 
     const button = document.createElement(action.tagName || "button");
@@ -1099,6 +1137,9 @@ function openPicker(config) {
     keepConfirm: Boolean(config.keepConfirm),
     extraActions: config.extraActions || [],
     statusLine: config.statusLine || "",
+    remoteSearch: Boolean(config.remoteSearch),
+    onSearch: config.onSearch || null,
+    onSelectionChange: config.onSelectionChange || null,
   };
 
   const backdrop = getEl("pickerBackdrop");
@@ -1127,6 +1168,7 @@ function openPicker(config) {
   renderPickerList();
   renderPickerActions();
   renderPickerExtras();
+  if (config.focusSearch !== false) window.setTimeout(() => search?.focus(), 0);
 }
 
 function getSortField() {
@@ -2262,6 +2304,134 @@ async function openImportFilePicker() {
   input.click();
 }
 
+function libraryAddExtras() {
+  return [{
+    type: "input",
+    label: "Citation key",
+    value: libraryAddState.citationKey,
+    placeholder: "AuthorYear",
+    disabled: !getSelectedPickerItem() || Boolean(getSelectedPickerItem()?.current_key),
+    onInput: (value) => {
+      libraryAddState.citationKey = value;
+    },
+  }];
+}
+
+function refreshLibraryAddConfirm() {
+  if (pickerState?.mode !== "library-add") return;
+  const button = getEl("pickerConfirmBtn");
+  const selected = getSelectedPickerItem();
+  if (button) button.disabled = Boolean(selected?.current_key);
+}
+
+function renderLibraryAddPreview(item) {
+  if (!item) return "";
+  if (item.current_key) {
+    return `<div class="text-muted small">Already present in the current bibliography as <code>${escapeHtml(item.current_key)}</code>.</div>`;
+  }
+  return `
+    <div class="fw-semibold">${escapeHtml(item.title || "(No title)")}</div>
+    <div class="picker-meta mb-2">${escapeHtml(pickerMeta([item.author, item.year, item.type]))}</div>
+    <div class="text-muted small">This record is shared by ${item.reference_count || 0} bibliograph${item.reference_count === 1 ? "y" : "ies"}. It will receive the local citation key shown above.</div>
+    <pre class="mt-2 mb-0 small">${escapeHtml(item.raw || "")}</pre>
+  `;
+}
+
+async function searchLibraryForAdd(query) {
+  const cleanQuery = String(query || "").trim();
+  const token = ++libraryAddState.queryToken;
+  if (!cleanQuery) {
+    if (pickerState?.mode === "library-add") {
+      libraryAddState.citationKey = "";
+      pickerState.items = [];
+      pickerState.statusLine = "Type a title, author, DOI, or existing citation key to search the global library.";
+      renderPickerList();
+      renderPickerExtras();
+      refreshLibraryAddConfirm();
+    }
+    return;
+  }
+  if (pickerState?.mode === "library-add") {
+    pickerState.statusLine = "Searching global library…";
+    renderPickerExtras();
+  }
+  const res = await searchLibraryEntries(cleanQuery);
+  if (token !== libraryAddState.queryToken || pickerState?.mode !== "library-add") return;
+  if (!res.ok) throw new Error(res.description || res.error || "Global library search failed");
+  libraryAddState.citationKey = "";
+  pickerState.items = (res.items || []).map((item) => ({
+    ...item,
+    id: String(item.entry_id),
+    key: item.current_key || item.suggested_key || `entry:${item.entry_id}`,
+    meta: pickerMeta([item.author, item.year, item.type, `${item.reference_count || 0} bibliographies`]),
+    badge: item.current_key ? "Already added" : "Library",
+    selected: false,
+    searchText: "",
+  }));
+  pickerState.statusLine = pickerState.items.length
+    ? `${res.total} matching database entr${res.total === 1 ? "y" : "ies"}.`
+    : "No global database entries match that search.";
+  renderPickerList();
+  renderPickerExtras();
+  refreshLibraryAddConfirm();
+}
+
+function openLibraryAddPicker() {
+  if (databaseView) {
+    showMessageDialog("Select a Bibliography", "Choose a bib file before adding an entry from the global library.");
+    return;
+  }
+  window.clearTimeout(libraryAddState.searchTimer);
+  libraryAddState = { queryToken: libraryAddState.queryToken + 1, searchTimer: null, citationKey: "" };
+  openPicker({
+    mode: "library-add",
+    title: "Add from Global Library",
+    subtitle: "Search the shared catalogue, then assign a citation key for the current bibliography.",
+    confirmText: "Add to Current Bib File",
+    emptyMessage: "Type a title, author, DOI, or citation key to search the global library.",
+    items: [],
+    singleSelect: true,
+    showPreview: true,
+    previewLabel: "Database entry",
+    previewEmptyText: "Select a search result to inspect it and choose its local citation key.",
+    previewRenderer: renderLibraryAddPreview,
+    remoteSearch: true,
+    statusLine: "Type a title, author, DOI, or existing citation key to search the global library.",
+    extraActions: libraryAddExtras(),
+    onSelectionChange: (item, selected) => {
+      if (selected && !item.current_key) {
+        libraryAddState.citationKey = item.suggested_key || "Entry";
+      }
+      if (pickerState?.mode === "library-add") {
+        renderPickerExtras();
+        refreshLibraryAddConfirm();
+      }
+    },
+    onSearch: (query) => {
+      window.clearTimeout(libraryAddState.searchTimer);
+      libraryAddState.searchTimer = window.setTimeout(() => {
+        searchLibraryForAdd(query).catch((err) => {
+          if (pickerState?.mode !== "library-add") return;
+          pickerState.statusLine = formatUiError(err, "Global library search failed");
+          renderPickerExtras();
+        });
+      }, 150);
+    },
+    onConfirm: async (selectedItems) => {
+      const [selected] = selectedItems;
+      if (selected.current_key) {
+        throw new Error(`This entry is already in the current bibliography as '${selected.current_key}'`);
+      }
+      const key = libraryAddState.citationKey.trim();
+      if (!key) throw new Error("Enter a citation key before adding the entry");
+      const res = await addLibraryEntry(selected.entry_id, key);
+      if (!res.ok) throw new Error(res.description || res.error || "Could not add the library entry");
+      await loadEntries({ database: false });
+      showToast(`Added ${res.key} to ${res.filename}`);
+    },
+  });
+}
+
 function getEl(id) {
   return document.getElementById(id);
 }
@@ -2272,6 +2442,7 @@ function initUI() {
   editor = getEl("editRaw");
   searchInput = getEl("search");
   refreshScanToolbarButton();
+  refreshLibraryAddToolbar();
   setScanEditLock(false);
 
   const sortBtns = document.querySelectorAll(".sort-btn");
@@ -2318,6 +2489,7 @@ function initUI() {
     }
   });
   getEl("importToolbarBtn")?.addEventListener("click", openImportFilePicker);
+  getEl("libraryAddToolbarBtn")?.addEventListener("click", openLibraryAddPicker);
   getEl("scanToolbarBtn")?.addEventListener("click", async () => {
     try {
       await loadScanServices();
@@ -2424,6 +2596,10 @@ function initUI() {
   getEl("pickerSearch")?.addEventListener("input", (event) => {
     if (!pickerState) return;
     pickerState.query = event.target.value || "";
+    if (pickerState.onSearch) {
+      pickerState.onSearch(pickerState.query);
+      return;
+    }
     renderPickerList();
   });
   getEl("pickerSelectVisibleBtn")?.addEventListener("click", () => {
@@ -2467,13 +2643,19 @@ function initUI() {
   });
 
   document.addEventListener("keydown", (event) => {
+    const modifier = event.ctrlKey || event.metaKey;
+    if (modifier && event.key.toLowerCase() === "k" && !pickerState && !getEl("dialogBackdrop")?.classList.contains("open")) {
+      event.preventDefault();
+      searchInput?.focus();
+      searchInput?.select();
+      return;
+    }
     if (event.key === "Enter" && pickerState?.mode === "bib-file") {
       event.preventDefault();
       getEl("pickerConfirmBtn")?.click();
       return;
     }
     const editingTarget = ["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName);
-    const modifier = event.ctrlKey || event.metaKey;
     if (modifier && !editingTarget && event.key.toLowerCase() === "a") {
       event.preventDefault();
       selectedEntries = new Map(allEntries.map((entry) => [entry.entry_id || entry.key, entry]));

@@ -202,6 +202,41 @@ class LibraryStore:
               GROUP BY e.id ORDER BY e.id LIMIT ? OFFSET ?""", (limit, offset)).fetchall()
         return rows, total
 
+    def search_entries(self, query, filename, limit=25, offset=0):
+        """Find catalogue entries without materialising the whole library."""
+        query = str(query or "").strip()
+        limit = max(1, min(int(limit or 25), 50))
+        offset = max(0, int(offset or 0))
+        if not query:
+            return [], 0
+
+        # Treat user input literally; '%' and '_' must not become LIKE wildcards.
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        where = """(e.fields LIKE ? ESCAPE '\\' COLLATE NOCASE OR EXISTS (
+            SELECT 1 FROM bibliography_entries search_m
+            WHERE search_m.entry_id=e.id AND search_m.citation_key LIKE ? ESCAPE '\\' COLLATE NOCASE
+        ))"""
+        with self.session() as db:
+            total = db.execute(f"SELECT COUNT(*) FROM entries e WHERE {where}", (pattern, pattern)).fetchone()[0]
+            rows = db.execute(f"""SELECT e.id entry_id, e.fields, e.entry_type, e.work_id,
+                e.created_at, e.updated_at,
+                (SELECT COUNT(*) FROM bibliography_entries refs WHERE refs.entry_id=e.id) reference_count,
+                (SELECT current_m.citation_key FROM bibliography_entries current_m
+                  JOIN bibliographies current_b ON current_b.id=current_m.bibliography_id
+                  WHERE current_m.entry_id=e.id AND current_b.filename=? LIMIT 1) current_key
+                FROM entries e WHERE {where}
+                ORDER BY e.id DESC LIMIT ? OFFSET ?""",
+                (filename, pattern, pattern, limit, offset)).fetchall()
+        return rows, total
+
+    def entry_for_id(self, entry_id, key):
+        with self.session() as db:
+            row = db.execute("SELECT fields, entry_type FROM entries WHERE id=?", (int(entry_id),)).fetchone()
+        if not row:
+            return None
+        return self._decode(row["fields"], key, row["entry_type"])
+
     def bibliography_stats(self):
         with self.session() as db:
             rows = db.execute("""SELECT b.filename, b.created_at, b.updated_at,

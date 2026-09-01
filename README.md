@@ -18,6 +18,7 @@ The project stays deliberately simple: one local SQLite file, no accounts, and n
 * Export selected entries to `export.bib` or to a ZIP with matching PDFs plus a static HTML index
 * Keep bounded per-file history with restore support
 * Share identical entries between bibliographies while retaining near-identical variants
+* Search the global library and add a shared entry to the active bibliography with a local citation key
 * Switch between multiple `.bib` files in `bib/`
 * Create and safely delete bibliography projections without deleting shared database entries
 * Open the entire SQLite database and review unreferenced entries
@@ -25,7 +26,7 @@ The project stays deliberately simple: one local SQLite file, no accounts, and n
 * Show DOI, URL, arXiv, and PDF links when available
 * Work reasonably well on mobile as well as desktop
 
-Entry selection supports Ctrl-click/Cmd-click for multi-selection. Outside text fields, Ctrl/Cmd+A selects all loaded entries, Ctrl/Cmd+C copies the selected BibLaTeX, Ctrl/Cmd+Z performs Undo, and Ctrl/Cmd+V opens the normal import review for clipboard BibLaTeX.
+Entry selection supports Ctrl-click/Cmd-click for multi-selection. Cmd/Ctrl+K focuses the main search field. Outside text fields, Ctrl/Cmd+A selects all loaded entries, Ctrl/Cmd+C copies the selected BibLaTeX, Ctrl/Cmd+Z performs Undo, and Ctrl/Cmd+V opens the normal import review for clipboard BibLaTeX.
 
 Import and export both pass the resulting bibliography through the sort/dedupe routine before writing or downloading it. Small toast notifications confirm actions such as save, add, import, export, undo, and restore.
 

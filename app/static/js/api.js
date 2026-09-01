@@ -35,6 +35,21 @@ export async function fetchEntryPage({ offset = 0, limit = 10, database = false 
   return await parseResponse(res);
 }
 
+export async function searchLibraryEntries(query, { offset = 0, limit = 25 } = {}) {
+  const params = new URLSearchParams({ q: query, offset, limit });
+  const res = await fetch(`/api/library/search?${params}`);
+  return await parseResponse(res);
+}
+
+export async function addLibraryEntry(entryId, key) {
+  const res = await fetch(`/api/library/entries/${encodeURIComponent(entryId)}/add`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key }),
+  });
+  return await parseResponse(res);
+}
+
 export async function fetchScanServices() {
   const res = await fetch("/api/scan/services");
   return await parseResponse(res);

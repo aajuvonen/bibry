@@ -336,6 +336,32 @@ def _derived_key_for_change(existing_key, existing_entry, new_entry):
     return f"{new_author}{new_year}{match.group('suffix')}"
 
 
+def _library_key_suggestion(entry, existing_keys):
+    author = _lead_author_token(entry)
+    year = _entry_year_token(entry)
+    base = f"{author}{year}" or author or year or "Entry"
+    used = {str(key).lower() for key in existing_keys}
+    if base.lower() not in used:
+        return base
+    suffix_index = 0
+    while True:
+        value = suffix_index
+        suffix = ""
+        while True:
+            suffix = chr(ord("a") + (value % 26)) + suffix
+            value = value // 26 - 1
+            if value < 0:
+                break
+        candidate = f"{base}{suffix}"
+        if candidate.lower() not in used:
+            return candidate
+        suffix_index += 1
+
+
+def _valid_citation_key(key):
+    return bool(re.fullmatch(r"[^\s,{}]+", str(key or "")))
+
+
 def _move_pdf_for_key_change(old_key, new_key):
     if not old_key or not new_key or old_key == new_key:
         return False
@@ -446,6 +472,59 @@ def api_entries_page():
     return jsonify({"items": items, "total": total, "offset": offset,
                     "limit": limit, "next_offset": offset + len(items) if offset + len(items) < total else None,
                     "database": database})
+
+
+@api_bp.route("/library/search")
+def api_library_search():
+    query = request.args.get("q", "")
+    limit = request.args.get("limit", 25, type=int)
+    offset = request.args.get("offset", 0, type=int)
+    filename = bibstore.get_current_bib_filename()
+    library = bibstore.get_library()
+    rows, total = library.search_entries(query, filename, limit, offset)
+    existing_keys = library.memberships_for(filename).keys()
+    items = []
+    for row in rows:
+        parsed = BibEntry(row["fields"])
+        fields = parsed.fields or {}
+        items.append({
+            "entry_id": row["entry_id"],
+            "type": row["entry_type"],
+            "title": latex_to_text(fields.get("title", "")),
+            "author": latex_to_text(fields.get("author", fields.get("editor", ""))),
+            "year": latex_to_text(fields.get("year", fields.get("date", "")))[:4],
+            "reference_count": row["reference_count"],
+            "current_key": row["current_key"],
+            "suggested_key": _library_key_suggestion({**fields, "ENTRYTYPE": row["entry_type"]}, existing_keys),
+            "raw": row["fields"].strip(),
+        })
+    return jsonify({"items": items, "total": total, "offset": offset,
+                    "limit": min(max(limit, 1), 50),
+                    "next_offset": offset + len(items) if offset + len(items) < total else None,
+                    "filename": filename})
+
+
+@api_bp.route("/library/entries/<int:entry_id>/add", methods=["POST"])
+def api_add_library_entry(entry_id):
+    key = str((request.json or {}).get("key", "")).strip()
+    if not _valid_citation_key(key):
+        abort(400, "Citation key must not be empty or contain whitespace, commas, or braces")
+
+    filename = bibstore.get_current_bib_filename()
+    library = bibstore.get_library()
+    memberships = library.memberships_for(filename)
+    if key in memberships:
+        abort(409, f"Entry '{key}' already exists in {filename}")
+    if any(membership.get("entry_id") == entry_id for membership in memberships.values()):
+        abort(409, "This database entry is already in the current bibliography")
+    entry = library.entry_for_id(entry_id, key)
+    if entry is None:
+        abort(404, "Database entry not found")
+
+    db = bibstore.load_bib()
+    db.entries.append(entry)
+    bibstore.save_bib(db, action="add-library-entry")
+    return jsonify({"ok": True, "entry_id": entry_id, "filename": filename, "key": key}), 201
 
 # Endpoint: list all entries (with metadata)
 @api_bp.route("/entries")
