@@ -756,7 +756,7 @@ function renderPickerExtras() {
       input.addEventListener("input", (event) => action.onInput?.(event.target.value));
       wrapper.appendChild(input);
       extra.appendChild(wrapper);
-      continue;
+      return;
     }
 
     const button = document.createElement(action.tagName || "button");
