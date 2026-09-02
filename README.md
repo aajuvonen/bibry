@@ -17,11 +17,11 @@ The project stays deliberately simple: one local SQLite file, no accounts, and n
 * Scan the global PDF directory for orphan files and review safe rename/ignore actions
 * Export selected entries to `export.bib` or to a ZIP with matching PDFs plus a static HTML index
 * Keep bounded per-file history with restore support
-* Share identical entries between bibliographies while retaining near-identical variants
+* Share identical entries between bibliographies with one catalogue-wide citation key and PDF name
 * Search the global library and add a shared entry to the active bibliography with a local citation key
 * Switch between multiple `.bib` files in `bib/`
 * Create and safely delete bibliography projections without deleting shared database entries
-* Open the entire SQLite database and review unreferenced entries
+* Open the entire SQLite database, merge corrected duplicates, and remove unreferenced entries
 * Load large bibliographies progressively in small pages
 * Show DOI, URL, arXiv, and PDF links when available
 * Work reasonably well on mobile as well as desktop
@@ -34,7 +34,7 @@ Import and export both pass the resulting bibliography through the sort/dedupe r
 
 Bibry includes a `Scan` launcher in the toolbar. Scans never mutate the `.bib` file automatically. Every suggested change is reviewed first.
 
-The Scan launcher also includes **Database Orphans**, which lists database entries that are not referenced by any bibliography. Deletion requires selecting entries, confirming the count, and typing the requested confirmation text. Retaining an entry leaves it available in the global database view.
+The Scan launcher includes **Database Orphans**, which lists database entries not referenced by any bibliography. Deletion requires selecting entries, confirming the count, and typing the requested confirmation text. It also includes **Citation Key Integrity**, a guided repair for legacy key aliases or clashes; PDF files are never renamed automatically by this repair.
 
 ### Crossref Scan
 
@@ -106,7 +106,7 @@ project/
 * `bib/library.sqlite3` is the canonical catalogue of entries and bibliography membership
 * `.bib` files remain standalone, flat BibLaTeX projections suitable for LaTeX, version control, and backup
 * Identical entry data may be shared by several bibliographies
-* Citation keys remain local to a bibliography, and near-identical records can remain separate variants
+* Every database entry has one catalogue-wide citation key; shared copies use it in every bibliography, while near-identical records receive distinct keys
 * Editing an entry in one bibliography creates a local variant; use the share operation when the edited record should be reused elsewhere
 * `bib/` contains the available bibliography files
 * `bib/.active_bib` stores the currently selected bibliography filename

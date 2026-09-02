@@ -442,9 +442,9 @@ def save_bib(db, action="save"):
         set_last_bib_state(previous_text)
     else:
         set_last_bib_state(None)
+    db.entries = get_library().save_entries(get_current_bib_filename(), db.entries)
     writer = bibtexparser.bwriter.BibTexWriter()
     new_text = writer.write(db) if db.entries else ""
-    get_library().save_entries(get_current_bib_filename(), db.entries)
     bibfile.write_text(new_text, encoding="utf-8")
     _record_history(previous_text, new_text, action)
     _BIB_SIGNATURE = get_bib_signature()
@@ -466,9 +466,9 @@ def save_bib_text(text, action="save-text"):
 
     parser = bibtexparser.bparser.BibTexParser(common_strings=True)
     db = bibtexparser.loads(text, parser=parser)
+    db.entries = get_library().save_entries(get_current_bib_filename(), db.entries)
     writer = bibtexparser.bwriter.BibTexWriter()
     normalized_text = writer.write(db) if db.entries else ""
-    get_library().save_entries(get_current_bib_filename(), db.entries)
     bibfile.write_text(normalized_text, encoding="utf-8")
     _record_history(previous_text, normalized_text, action)
     _BIB_SIGNATURE = None

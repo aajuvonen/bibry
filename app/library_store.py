@@ -1,8 +1,8 @@
 """SQLite-backed catalogue for shared BibLaTeX entries.
 
-The catalogue deliberately keeps bibliography membership separate from entry
-identity.  Citation keys are membership-local; an entry may be referenced by
-many bibliography files and a work may have several entry variants.
+Each entry owns one catalogue-wide citation key.  Bibliography membership is
+separate from entry identity, but always projects that canonical key so PDFs
+named after citation keys remain unambiguous.
 """
 import hashlib
 import re
@@ -104,6 +104,13 @@ class LibraryStore:
             CREATE INDEX IF NOT EXISTS idx_entries_work ON entries(work_id);
             CREATE INDEX IF NOT EXISTS idx_membership_entry ON bibliography_entries(entry_id);
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(entries)")}
+            if "canonical_key" not in columns:
+                db.execute("ALTER TABLE entries ADD COLUMN canonical_key TEXT")
+            db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_canonical_key
+                          ON entries(canonical_key COLLATE NOCASE)
+                          WHERE canonical_key IS NOT NULL""")
+            self._adopt_unambiguous_canonical_keys(db)
 
     @staticmethod
     def _encode(entry):
@@ -129,11 +136,55 @@ class LibraryStore:
                          (filename, now, now))
         return cur.lastrowid
 
+    @staticmethod
+    def _key_base(entry):
+        key = re.sub(r"\s+", "", str(entry.get("ID") or ""))
+        return key or "Entry"
+
+    def _available_canonical_key(self, db, desired, entry_id=None):
+        desired = self._key_base({"ID": desired})
+        candidate = desired
+        suffix_index = 0
+        while True:
+            row = db.execute("SELECT id FROM entries WHERE canonical_key=? COLLATE NOCASE", (candidate,)).fetchone()
+            if not row or row["id"] == entry_id:
+                return candidate
+            suffix = ""
+            value = suffix_index
+            while True:
+                suffix = chr(ord("a") + value % 26) + suffix
+                value = value // 26 - 1
+                if value < 0:
+                    break
+            candidate = f"{desired}{suffix}"
+            suffix_index += 1
+
+    def _adopt_unambiguous_canonical_keys(self, db):
+        """Backfill old catalogues without guessing collision ownership."""
+        rows = db.execute("""SELECT e.id, GROUP_CONCAT(DISTINCT m.citation_key) keys
+            FROM entries e LEFT JOIN bibliography_entries m ON m.entry_id=e.id
+            WHERE e.canonical_key IS NULL GROUP BY e.id""").fetchall()
+        for row in rows:
+            keys = [key for key in (row["keys"] or "").split(",") if key]
+            if len(keys) != 1:
+                continue
+            owner = db.execute("SELECT id FROM entries WHERE canonical_key=? COLLATE NOCASE", (keys[0],)).fetchone()
+            if owner and owner["id"] != row["id"]:
+                continue
+            # Do not claim a key still used by a different legacy entry.
+            other = db.execute("""SELECT DISTINCT entry_id FROM bibliography_entries
+                WHERE citation_key=? COLLATE NOCASE AND entry_id<>?""", (keys[0], row["id"])).fetchone()
+            if not other:
+                db.execute("UPDATE entries SET canonical_key=? WHERE id=?", (keys[0], row["id"]))
+
     def _entry_id(self, db, entry):
         sig = _signature(entry)
-        row = db.execute("SELECT id FROM entries WHERE signature=?", (sig,)).fetchone()
+        row = db.execute("SELECT id, canonical_key FROM entries WHERE signature=?", (sig,)).fetchone()
         if row:
-            return row["id"]
+            canonical_key = row["canonical_key"] or self._available_canonical_key(db, self._key_base(entry), row["id"])
+            if not row["canonical_key"]:
+                db.execute("UPDATE entries SET canonical_key=? WHERE id=?", (canonical_key, row["id"]))
+            return row["id"], canonical_key
         identity = _identity(entry)
         work_id = None
         if identity:
@@ -144,12 +195,14 @@ class LibraryStore:
                 work_id = db.execute("INSERT INTO works(identity,created_at) VALUES(?,?)",
                                      (identity, _utc_now())).lastrowid
         raw = self._encode(entry)
-        cur = db.execute("""INSERT INTO entries(work_id,entry_type,fields,signature,created_at,updated_at)
-                           VALUES(?,?,?,?,?,?)""",
-                         (work_id, entry.get("ENTRYTYPE", "misc"), raw, sig, _utc_now(), _utc_now()))
-        return cur.lastrowid
+        canonical_key = self._available_canonical_key(db, self._key_base(entry))
+        cur = db.execute("""INSERT INTO entries(work_id,entry_type,fields,signature,canonical_key,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,?)""",
+                         (work_id, entry.get("ENTRYTYPE", "misc"), raw, sig, canonical_key, _utc_now(), _utc_now()))
+        return cur.lastrowid, canonical_key
 
     def import_file(self, filename, entries):
+        normalized = []
         with self.session() as db:
             bibliography_id = self._bibliography(db, filename)
             db.execute("DELETE FROM bibliography_entries WHERE bibliography_id=?", (bibliography_id,))
@@ -157,10 +210,12 @@ class LibraryStore:
                 key = entry.get("ID")
                 if not key:
                     continue
-                entry_id = self._entry_id(db, entry)
+                entry_id, canonical_key = self._entry_id(db, entry)
                 db.execute("""INSERT INTO bibliography_entries
                     (bibliography_id,entry_id,citation_key,position) VALUES(?,?,?,?)""",
-                           (bibliography_id, entry_id, key, position))
+                           (bibliography_id, entry_id, canonical_key, position))
+                normalized.append({**entry, "ID": canonical_key})
+        return normalized
 
     def has_bibliographies(self):
         with self.session() as db:
@@ -168,13 +223,13 @@ class LibraryStore:
 
     def entries_for(self, filename):
         with self.session() as db:
-            rows = db.execute("""SELECT e.fields, e.entry_type, m.citation_key, m.position
+            rows = db.execute("""SELECT e.fields, e.entry_type, e.canonical_key, m.citation_key, m.position
                 FROM bibliography_entries m JOIN bibliographies b ON b.id=m.bibliography_id
                 JOIN entries e ON e.id=m.entry_id WHERE b.filename=? ORDER BY m.position, m.citation_key""",
                               (filename,)).fetchall()
         result = []
         for row in rows:
-            result.append(self._decode(row["fields"], row["citation_key"], row["entry_type"]))
+            result.append(self._decode(row["fields"], row["canonical_key"] or row["citation_key"], row["entry_type"]))
         return result
 
     def bibliography_page(self, filename, limit=10, offset=0):
@@ -183,7 +238,7 @@ class LibraryStore:
         with self.session() as db:
             total = db.execute("""SELECT COUNT(*) FROM bibliography_entries m
               JOIN bibliographies b ON b.id=m.bibliography_id WHERE b.filename=?""", (filename,)).fetchone()[0]
-            rows = db.execute("""SELECT e.fields, e.entry_type, e.id entry_id,
+            rows = db.execute("""SELECT e.fields, e.entry_type, e.canonical_key, e.id entry_id,
               e.work_id, e.created_at, e.updated_at, m.citation_key, m.position
               FROM bibliography_entries m JOIN bibliographies b ON b.id=m.bibliography_id
               JOIN entries e ON e.id=m.entry_id WHERE b.filename=?
@@ -196,7 +251,7 @@ class LibraryStore:
         offset = max(0, int(offset or 0))
         with self.session() as db:
             total = db.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
-            rows = db.execute("""SELECT e.fields, e.entry_type, e.id entry_id,
+            rows = db.execute("""SELECT e.fields, e.entry_type, e.canonical_key, e.id entry_id,
               e.work_id, e.created_at, e.updated_at, COUNT(m.bibliography_id) reference_count
               FROM entries e LEFT JOIN bibliography_entries m ON m.entry_id=e.id
               GROUP BY e.id ORDER BY e.id LIMIT ? OFFSET ?""", (limit, offset)).fetchall()
@@ -219,7 +274,7 @@ class LibraryStore:
         ))"""
         with self.session() as db:
             total = db.execute(f"SELECT COUNT(*) FROM entries e WHERE {where}", (pattern, pattern)).fetchone()[0]
-            rows = db.execute(f"""SELECT e.id entry_id, e.fields, e.entry_type, e.work_id,
+            rows = db.execute(f"""SELECT e.id entry_id, e.fields, e.entry_type, e.canonical_key, e.work_id,
                 e.created_at, e.updated_at,
                 (SELECT COUNT(*) FROM bibliography_entries refs WHERE refs.entry_id=e.id) reference_count,
                 (SELECT current_m.citation_key FROM bibliography_entries current_m
@@ -236,6 +291,19 @@ class LibraryStore:
         if not row:
             return None
         return self._decode(row["fields"], key, row["entry_type"])
+
+    def canonical_key_for_entry(self, entry_id):
+        with self.session() as db:
+            row = db.execute("SELECT canonical_key, fields FROM entries WHERE id=?", (int(entry_id),)).fetchone()
+            if not row:
+                return None
+            if row["canonical_key"]:
+                return row["canonical_key"]
+            membership = db.execute("SELECT citation_key FROM bibliography_entries WHERE entry_id=? LIMIT 1", (int(entry_id),)).fetchone()
+            parsed = self._decode(row["fields"], membership["citation_key"] if membership else "Entry", "misc")
+            key = self._available_canonical_key(db, self._key_base(parsed), int(entry_id))
+            db.execute("UPDATE entries SET canonical_key=? WHERE id=?", (key, int(entry_id)))
+            return key
 
     def bibliography_stats(self):
         with self.session() as db:
@@ -281,6 +349,9 @@ class LibraryStore:
                 db.execute(f"DELETE FROM entries WHERE id IN ({marks})", ids)
         return len(ids)
 
+    def delete_orphan_entry(self, entry_id):
+        return self.delete_orphan_entries([entry_id])
+
     def orphan_entries(self):
         with self.session() as db:
             return db.execute("""SELECT e.id entry_id, e.work_id, e.fields, e.entry_type,
@@ -288,18 +359,71 @@ class LibraryStore:
               LEFT JOIN bibliography_entries m ON m.entry_id=e.id
               GROUP BY e.id HAVING COUNT(m.bibliography_id)=0 ORDER BY e.id""").fetchall()
 
+    def key_integrity_issues(self):
+        """Return legacy aliases/collisions requiring an explicit repair."""
+        with self.session() as db:
+            rows = db.execute("""SELECT e.id entry_id, e.fields, e.entry_type, e.canonical_key,
+                GROUP_CONCAT(DISTINCT m.citation_key) keys
+                FROM entries e LEFT JOIN bibliography_entries m ON m.entry_id=e.id
+                GROUP BY e.id HAVING e.canonical_key IS NULL
+                ORDER BY e.id""").fetchall()
+            issues = []
+            for row in rows:
+                keys = [key for key in (row["keys"] or "").split(",") if key]
+                if not keys:
+                    continue
+                proposed = self._available_canonical_key(db, keys[0], row["entry_id"])
+                pdf_keys = [key for key in keys if (self.root / "pdf" / f"{key}.pdf").exists()]
+                issues.append({"entry_id": row["entry_id"], "fields": row["fields"],
+                               "entry_type": row["entry_type"], "keys": keys,
+                               "proposed_key": proposed, "pdf_keys": pdf_keys})
+        return issues
+
+    def repair_canonical_key(self, entry_id):
+        with self.session() as db:
+            row = db.execute("SELECT canonical_key FROM entries WHERE id=?", (int(entry_id),)).fetchone()
+            if not row:
+                raise KeyError(entry_id)
+            memberships = db.execute("SELECT citation_key, bibliography_id FROM bibliography_entries WHERE entry_id=?",
+                                     (int(entry_id),)).fetchall()
+            if not memberships:
+                return {"key": row["canonical_key"], "filenames": [], "old_keys": []}
+            key = row["canonical_key"] or self._available_canonical_key(db, memberships[0]["citation_key"], int(entry_id))
+            old_keys = sorted({membership["citation_key"] for membership in memberships})
+            db.execute("UPDATE entries SET canonical_key=? WHERE id=?", (key, int(entry_id)))
+            db.execute("UPDATE bibliography_entries SET citation_key=? WHERE entry_id=?", (key, int(entry_id)))
+            filenames = db.execute("""SELECT DISTINCT b.filename FROM bibliography_entries m
+                JOIN bibliographies b ON b.id=m.bibliography_id WHERE m.entry_id=?""", (int(entry_id),)).fetchall()
+        return {"key": key, "filenames": [row["filename"] for row in filenames], "old_keys": old_keys}
+
     def update_entry_globally(self, entry_id, entry):
         raw = self._encode(entry)
         signature = _signature(entry)
         with self.session() as db:
-            existing = db.execute("SELECT id FROM entries WHERE signature=? AND id<>?", (signature, entry_id)).fetchone()
+            if not db.execute("SELECT 1 FROM entries WHERE id=?", (entry_id,)).fetchone():
+                raise KeyError(entry_id)
+            existing = db.execute("SELECT id, canonical_key FROM entries WHERE signature=? AND id<>?", (signature, entry_id)).fetchone()
             if existing:
-                raise FileExistsError("An identical database entry already exists")
+                rows = db.execute("""SELECT m.bibliography_id, b.filename FROM bibliography_entries m
+                    JOIN bibliographies b ON b.id=m.bibliography_id WHERE m.entry_id=?""", (entry_id,)).fetchall()
+                for row in rows:
+                    duplicate = db.execute("SELECT 1 FROM bibliography_entries WHERE bibliography_id=? AND entry_id=?",
+                                           (row["bibliography_id"], existing["id"])).fetchone()
+                    if duplicate:
+                        db.execute("DELETE FROM bibliography_entries WHERE bibliography_id=? AND entry_id=?",
+                                   (row["bibliography_id"], entry_id))
+                    else:
+                        db.execute("""UPDATE bibliography_entries SET entry_id=?, citation_key=?
+                            WHERE bibliography_id=? AND entry_id=?""",
+                            (existing["id"], existing["canonical_key"], row["bibliography_id"], entry_id))
+                db.execute("DELETE FROM entries WHERE id=?", (entry_id,))
+                return {"filenames": sorted({row["filename"] for row in rows}), "merged": True,
+                        "entry_id": existing["id"]}
             db.execute("UPDATE entries SET entry_type=?, fields=?, signature=?, updated_at=? WHERE id=?",
                        (entry.get("ENTRYTYPE", "misc"), raw, signature, _utc_now(), entry_id))
             rows = db.execute("""SELECT DISTINCT b.filename FROM bibliography_entries m
               JOIN bibliographies b ON b.id=m.bibliography_id WHERE m.entry_id=?""", (entry_id,)).fetchall()
-        return [row["filename"] for row in rows]
+        return {"filenames": [row["filename"] for row in rows], "merged": False, "entry_id": entry_id}
 
     def memberships_for(self, filename):
         with self.session() as db:
@@ -307,6 +431,10 @@ class LibraryStore:
               FROM bibliography_entries m JOIN bibliographies b ON b.id=m.bibliography_id
               JOIN entries e ON e.id=m.entry_id WHERE b.filename=?""", (filename,)).fetchall()
         return {row["citation_key"]: dict(row) for row in rows}
+
+    def citation_key_in_use(self, key):
+        with self.session() as db:
+            return db.execute("SELECT 1 FROM bibliography_entries WHERE citation_key=? COLLATE NOCASE LIMIT 1", (key,)).fetchone() is not None
 
     def all_entries_with_memberships(self):
         with self.session() as db:
@@ -325,7 +453,7 @@ class LibraryStore:
         return result
 
     def save_entries(self, filename, entries):
-        self.import_file(filename, entries)
+        return self.import_file(filename, entries)
 
     def refresh_projection(self, filename, path):
         entries = self.entries_for(filename)
@@ -369,12 +497,12 @@ class LibraryStore:
 
     def share(self, source_filename, key, target_filename, target_key=None):
         with self.session() as db:
-            source = db.execute("""SELECT e.id, e.entry_type FROM bibliography_entries m
+            source = db.execute("""SELECT e.id, e.entry_type, e.canonical_key FROM bibliography_entries m
               JOIN bibliographies b ON b.id=m.bibliography_id JOIN entries e ON e.id=m.entry_id
               WHERE b.filename=? AND m.citation_key=?""", (source_filename, key)).fetchone()
             if not source:
                 raise KeyError(key)
-            target_key = target_key or key
+            target_key = source["canonical_key"] or key
             target_id = self._bibliography(db, target_filename)
             db.execute("DELETE FROM bibliography_entries WHERE bibliography_id=? AND citation_key=?",
                        (target_id, target_key))

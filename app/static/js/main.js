@@ -27,6 +27,7 @@ import {
   deleteBibFile,
   editDatabaseEntry,
   deleteDatabaseOrphans,
+  repairCitationKeyIntegrity,
   searchLibraryEntries,
   addLibraryEntry,
 } from "./api.js";
@@ -820,7 +821,7 @@ function scanStatusLine() {
 
 function scanExtraActions() {
   const actions = scanState.services
-    .filter((service) => !["pdf-coverage", "pdf-orphans"].includes(service.name))
+    .filter((service) => !["pdf-coverage", "pdf-orphans", "database-orphans", "citation-key-integrity"].includes(service.name))
     .map((service) => ({
       label: scanState.running && scanState.currentService === service.name ? `${service.label} Running` : `Run ${service.label}`,
       className: "btn btn-sm btn-outline-primary",
@@ -858,6 +859,15 @@ function scanExtraActions() {
       className: "btn btn-sm btn-outline-danger",
       disabled: scanState.running,
       onClick: async () => await startScanFromModal(databaseOrphanService),
+    });
+  }
+  const keyIntegrityService = scanState.services.find((service) => service.name === "citation-key-integrity");
+  if (keyIntegrityService) {
+    actions.push({
+      label: keyIntegrityService.label || "Citation Key Integrity",
+      className: "btn btn-sm btn-outline-warning",
+      disabled: scanState.running,
+      onClick: async () => await startScanFromModal(keyIntegrityService),
     });
   }
   actions.push({
@@ -1712,6 +1722,32 @@ function openDatabaseOrphanPicker(result) {
   });
 }
 
+function openCitationKeyIntegrityPicker(result) {
+  const items = buildScanReviewItems(result.items || []).map((item) => ({
+    ...item,
+    key: item.proposed_key || item.key,
+    badge: "Key repair",
+    meta: pickerMeta([item.meta, `current: ${(item.old_keys || []).join(", ")}`, item.pdf_keys?.length ? "PDF requires review" : ""]),
+  }));
+  openPicker({
+    mode: "citation-key-integrity",
+    title: "Citation Key Integrity",
+    subtitle: "Review proposed globally unique keys. Existing PDFs are never renamed automatically.",
+    confirmText: "Repair Selected",
+    emptyMessage: "All catalogue entries already have unambiguous global citation keys.",
+    items,
+    singleSelect: false,
+    onConfirm: async (selected) => {
+      for (const item of selected) {
+        const response = await repairCitationKeyIntegrity(item.entry_id);
+        if (!response.ok) throw new Error(response.description || response.error || "Failed to repair citation key");
+      }
+      await loadEntries({ database: databaseView });
+      showToast(`Repaired ${selected.length} citation key${selected.length === 1 ? "" : "s"}`);
+    },
+  });
+}
+
 function buildExportItems() {
   return allEntries.map((entry) => ({
     id: `export-${entry.key}`,
@@ -1922,6 +1958,12 @@ async function startScanFromModal(service) {
     const res = await runScan(service.name);
     if (!res.ok) throw new Error(res.description || res.error || "Database orphan scan failed");
     openDatabaseOrphanPicker(res);
+    return;
+  }
+  if (service.name === "citation-key-integrity") {
+    const res = await runScan(service.name);
+    if (!res.ok) throw new Error(res.description || res.error || "Citation-key scan failed");
+    openCitationKeyIntegrityPicker(res);
     return;
   }
 
@@ -2310,7 +2352,7 @@ function libraryAddExtras() {
     label: "Citation key",
     value: libraryAddState.citationKey,
     placeholder: "AuthorYear",
-    disabled: !getSelectedPickerItem() || Boolean(getSelectedPickerItem()?.current_key),
+    disabled: true,
     onInput: (value) => {
       libraryAddState.citationKey = value;
     },
@@ -2422,9 +2464,7 @@ function openLibraryAddPicker() {
       if (selected.current_key) {
         throw new Error(`This entry is already in the current bibliography as '${selected.current_key}'`);
       }
-      const key = libraryAddState.citationKey.trim();
-      if (!key) throw new Error("Enter a citation key before adding the entry");
-      const res = await addLibraryEntry(selected.entry_id, key);
+      const res = await addLibraryEntry(selected.entry_id, libraryAddState.citationKey.trim());
       if (!res.ok) throw new Error(res.description || res.error || "Could not add the library entry");
       await loadEntries({ database: false });
       showToast(`Added ${res.key} to ${res.filename}`);

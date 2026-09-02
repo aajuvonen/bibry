@@ -1018,12 +1018,38 @@ class DatabaseOrphanScanner:
         return {"items": items, "count": len(items), "scope": "global-catalogue"}
 
 
+class CitationKeyIntegrityScanner:
+    service_name = "citation-key-integrity"
+    display_name = "Citation Key Integrity"
+    phase_name = "phase6_citation_key_integrity"
+
+    def availability(self):
+        return {"available": True, "reason": "Finds legacy citation-key aliases and collisions."}
+
+    def scan_entries(self, entries_by_key=None):
+        items = []
+        for issue in bibstore.get_library().key_integrity_issues():
+            entry = bibstore.get_library()._decode(issue["fields"], f"db:{issue['entry_id']}", issue["entry_type"])
+            items.append({
+                "id": f"{self.phase_name}:{issue['entry_id']}",
+                "entry_id": issue["entry_id"], "key": ", ".join(issue["keys"]),
+                "title": _clean_text(entry.get("title")),
+                "type": (entry.get("ENTRYTYPE") or "misc").lower(),
+                "summary": " • ".join(filter(None, [_clean_text(entry.get("author") or entry.get("editor")),
+                                                      _clean_text(entry.get("year"))])),
+                "proposed_key": issue["proposed_key"], "old_keys": issue["keys"],
+                "pdf_keys": issue["pdf_keys"],
+            })
+        return {"items": items, "count": len(items), "scope": "global-catalogue"}
+
+
 SCAN_SERVICES = {
     CrossrefScanner.service_name: CrossrefScanner(),
     WorldCatScanner.service_name: WorldCatScanner(),
     PdfCoverageScanner.service_name: PdfCoverageScanner(),
     PdfOrphanScanner.service_name: PdfOrphanScanner(),
     DatabaseOrphanScanner.service_name: DatabaseOrphanScanner(),
+    CitationKeyIntegrityScanner.service_name: CitationKeyIntegrityScanner(),
 }
 
 

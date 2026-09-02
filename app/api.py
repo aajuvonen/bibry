@@ -379,9 +379,11 @@ def _replace_entry_with_key(db, existing_index, key, new_entry, action):
         abort(409, f"Entry '{new_key}' already exists")
     db.entries[existing_index] = new_entry
     bibstore.save_bib(db, action=action)
-    _move_pdf_for_key_change(key, new_key)
-    rename_entry_metadata(key, new_key)
-    return new_key
+    canonical_key = db.entries[existing_index].get("ID") or new_key
+    if not bibstore.get_library().citation_key_in_use(key):
+        _move_pdf_for_key_change(key, canonical_key)
+    rename_entry_metadata(key, canonical_key)
+    return canonical_key
 
 # Endpoint: current version for live refresh
 @api_bp.route("/version")
@@ -495,7 +497,7 @@ def api_library_search():
             "year": latex_to_text(fields.get("year", fields.get("date", "")))[:4],
             "reference_count": row["reference_count"],
             "current_key": row["current_key"],
-            "suggested_key": _library_key_suggestion({**fields, "ENTRYTYPE": row["entry_type"]}, existing_keys),
+            "suggested_key": row["canonical_key"] or _library_key_suggestion({**fields, "ENTRYTYPE": row["entry_type"]}, existing_keys),
             "raw": row["fields"].strip(),
         })
     return jsonify({"items": items, "total": total, "offset": offset,
@@ -506,12 +508,11 @@ def api_library_search():
 
 @api_bp.route("/library/entries/<int:entry_id>/add", methods=["POST"])
 def api_add_library_entry(entry_id):
-    key = str((request.json or {}).get("key", "")).strip()
-    if not _valid_citation_key(key):
-        abort(400, "Citation key must not be empty or contain whitespace, commas, or braces")
-
     filename = bibstore.get_current_bib_filename()
     library = bibstore.get_library()
+    key = library.canonical_key_for_entry(entry_id)
+    if key is None:
+        abort(404, "Database entry not found")
     memberships = library.memberships_for(filename)
     if key in memberships:
         abort(409, f"Entry '{key}' already exists in {filename}")
@@ -564,18 +565,21 @@ def api_entry(key):
 def api_database_entry_edit(entry_id):
     raw = (request.json or {}).get("raw", "")
     if not raw.strip():
-        abort(400, "Database entries cannot be empty")
+        if not bibstore.get_library().delete_orphan_entry(entry_id):
+            abort(409, "Referenced database entries cannot be deleted; remove them from bibliographies first")
+        return jsonify({"ok": True, "entry_id": entry_id, "deleted": True})
     parser = bibtexparser.bparser.BibTexParser(common_strings=True)
     parsed = bibtexparser.loads(raw, parser=parser)
     if len(parsed.entries) != 1:
         abort(400, "Exactly one BibLaTeX entry is required")
     try:
-        filenames = bibstore.get_library().update_entry_globally(entry_id, parsed.entries[0])
-    except FileExistsError as exc:
-        abort(409, str(exc))
-    for filename in filenames:
+        result = bibstore.get_library().update_entry_globally(entry_id, parsed.entries[0])
+    except KeyError:
+        abort(404, "Database entry not found")
+    for filename in result["filenames"]:
         bibstore.get_library().refresh_projection(filename, bibstore.BIB_DIR / filename)
-    return jsonify({"ok": True, "entry_id": entry_id, "updated_bibliographies": filenames})
+    return jsonify({"ok": True, "entry_id": result["entry_id"], "merged": result["merged"],
+                    "updated_bibliographies": result["filenames"]})
 
 
 @api_bp.route("/entry/<key>/variants")
@@ -699,7 +703,7 @@ def api_add_entry():
 
     db.entries.append(new_entry)
     bibstore.save_bib(db, action="add-entry")
-    return jsonify({"ok": True, "key": new_key}), 201
+    return jsonify({"ok": True, "key": db.entries[-1].get("ID", new_key)}), 201
 
 
 @api_bp.route("/import/preview", methods=["POST"])
@@ -1004,6 +1008,20 @@ def api_delete_database_orphans():
         abort(400, "Type the exact deletion confirmation")
     deleted = bibstore.get_library().delete_orphan_entries(entry_ids)
     return jsonify({"ok": True, "deleted": deleted})
+
+
+@api_bp.route("/scan/citation-key-integrity/repair", methods=["POST"])
+def api_repair_citation_key_integrity():
+    entry_id = (request.json or {}).get("entry_id")
+    if entry_id is None:
+        abort(400, "Database entry is required")
+    try:
+        result = bibstore.get_library().repair_canonical_key(entry_id)
+    except KeyError:
+        abort(404, "Database entry not found")
+    for filename in result["filenames"]:
+        bibstore.get_library().refresh_projection(filename, bibstore.BIB_DIR / filename)
+    return jsonify({"ok": True, **result})
 
 
 @api_bp.route("/scan/orphans/action", methods=["POST"])
