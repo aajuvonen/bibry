@@ -13,6 +13,7 @@ from pathlib import Path
 
 import bibtexparser
 
+from .biblatex import load as load_biblatex_file, loads as load_biblatex
 from .sort_dedupe_bibtex import process_bibtex_text
 
 
@@ -120,7 +121,7 @@ class LibraryStore:
 
     @staticmethod
     def _decode(raw, key, entry_type):
-        parsed = bibtexparser.loads(raw)
+        parsed = load_biblatex(raw)
         entry = parsed.entries[0] if parsed.entries else {}
         entry["ID"] = key
         entry["ENTRYTYPE"] = entry_type
@@ -466,7 +467,7 @@ class LibraryStore:
         for path in sorted(paths):
             try:
                 with path.open(encoding="utf-8") as handle:
-                    parsed = bibtexparser.load(handle)
+                    parsed = load_biblatex_file(handle)
                 self.import_file(path.name, parsed.entries)
             except (OSError, ValueError):
                 continue

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .latex import latex_to_text
+from .biblatex import loads as load_biblatex
 from .sort_dedupe_bibtex import BibEntry
 from .sort_dedupe_bibtex import process_bibtex_text, split_entries
 from .library_store import LibraryStore
@@ -464,8 +465,7 @@ def save_bib_text(text, action="save-text"):
     else:
         set_last_bib_state(None)
 
-    parser = bibtexparser.bparser.BibTexParser(common_strings=True)
-    db = bibtexparser.loads(text, parser=parser)
+    db = load_biblatex(text)
     db.entries = get_library().save_entries(get_current_bib_filename(), db.entries)
     writer = bibtexparser.bwriter.BibTexWriter()
     normalized_text = writer.write(db) if db.entries else ""

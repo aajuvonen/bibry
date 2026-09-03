@@ -185,11 +185,11 @@ export async function deleteDatabaseOrphans(entryIds, confirmation) {
   return await parseResponse(res);
 }
 
-export async function repairCitationKeyIntegrity(entryId) {
+export async function repairCitationKeyIntegrity(entryIds) {
   const res = await fetch("/api/scan/citation-key-integrity/repair", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ entry_id: entryId }),
+    body: JSON.stringify({ entry_ids: entryIds }),
   });
   return await parseResponse(res);
 }

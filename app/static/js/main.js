@@ -440,6 +440,7 @@ function importStatusBadge(status) {
   if (status === "new") return "New";
   if (status === "same") return "Unchanged";
   if (status === "conflict") return "Conflict";
+  if (status === "duplicate-key") return "Duplicate key";
   return "";
 }
 
@@ -478,6 +479,10 @@ function renderImportPreview(item) {
 
   if (item.status === "same") {
     return `<div class="text-muted small">This entry matches the current bibliography entry exactly.</div>`;
+  }
+
+  if (item.status === "duplicate-key") {
+    return `<div class="text-danger small">${escapeHtml(item.conflict?.message || "This uploaded citation key appears more than once. Resolve it in the source file before importing.")}</div>`;
   }
 
   const conflict = item.conflict;
@@ -1728,6 +1733,7 @@ function openCitationKeyIntegrityPicker(result) {
     key: item.proposed_key || item.key,
     badge: "Key repair",
     meta: pickerMeta([item.meta, `current: ${(item.old_keys || []).join(", ")}`, item.pdf_keys?.length ? "PDF requires review" : ""]),
+    selected: true,
   }));
   openPicker({
     mode: "citation-key-integrity",
@@ -1738,12 +1744,10 @@ function openCitationKeyIntegrityPicker(result) {
     items,
     singleSelect: false,
     onConfirm: async (selected) => {
-      for (const item of selected) {
-        const response = await repairCitationKeyIntegrity(item.entry_id);
-        if (!response.ok) throw new Error(response.description || response.error || "Failed to repair citation key");
-      }
+      const response = await repairCitationKeyIntegrity(selected.map((item) => item.entry_id));
+      if (!response.ok) throw new Error(response.description || response.error || "Failed to repair citation keys");
       await loadEntries({ database: databaseView });
-      showToast(`Repaired ${selected.length} citation key${selected.length === 1 ? "" : "s"}`);
+      showToast(`Repaired ${response.repaired || selected.length} citation key${selected.length === 1 ? "" : "s"}`);
     },
   });
 }

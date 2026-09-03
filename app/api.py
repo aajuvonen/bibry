@@ -3,12 +3,14 @@ import html
 import io
 import re
 import zipfile
+from collections import Counter
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request, abort, send_from_directory, Response
 import bibtexparser
 
 from . import bibstore
+from .biblatex import loads as load_biblatex
 from .enrichment import build_entries_by_key, get_scan_service, list_scan_services
 from .latex import latex_to_text
 from .metadata_store import clear_suppressions, get_entry_metadata, load_metadata, rename_entry_metadata, set_entry_flag, set_entry_provenance, set_suppression
@@ -568,8 +570,7 @@ def api_database_entry_edit(entry_id):
         if not bibstore.get_library().delete_orphan_entry(entry_id):
             abort(409, "Referenced database entries cannot be deleted; remove them from bibliographies first")
         return jsonify({"ok": True, "entry_id": entry_id, "deleted": True})
-    parser = bibtexparser.bparser.BibTexParser(common_strings=True)
-    parsed = bibtexparser.loads(raw, parser=parser)
+    parsed = load_biblatex(raw)
     if len(parsed.entries) != 1:
         abort(400, "Exactly one BibLaTeX entry is required")
     try:
@@ -664,8 +665,7 @@ def api_edit(key):
         bibstore.save_bib(db, action="delete-entry")
         return jsonify({"deleted":True, "key": key})
 
-    parser = bibtexparser.bparser.BibTexParser(common_strings=True)
-    newdb = bibtexparser.loads(raw, parser=parser)
+    newdb = load_biblatex(raw)
 
     if len(newdb.entries)!=1:
         abort(400,"Invalid entry")
@@ -686,8 +686,7 @@ def api_add_entry():
     if raw.strip() == "":
         abort(400, "Entry content is required")
 
-    parser = bibtexparser.bparser.BibTexParser(common_strings=True)
-    newdb = bibtexparser.loads(raw, parser=parser)
+    newdb = load_biblatex(raw)
 
     if len(newdb.entries) != 1:
         abort(400, "Invalid entry")
@@ -722,13 +721,28 @@ def api_import_preview():
         for entry in bibstore.load_bib().entries
         if entry.get("ID")
     }
-    previews = []
+    parsed_items = []
+    key_counts = {}
     for raw in raw_entries:
         raw = raw.strip()
         if not raw.startswith("@"):
             continue
         preview = _entry_preview(raw)
-        incoming_entry = bibtexparser.loads(raw).entries[0]
+        parsed = load_biblatex(raw).entries
+        if len(parsed) != 1 or not parsed[0].get("ID"):
+            abort(400, f"Could not parse a BibLaTeX entry: {preview['key'] or raw[:40]}")
+        parsed_items.append((preview, parsed[0]))
+        key_counts[preview["key"]] = key_counts.get(preview["key"], 0) + 1
+
+    previews = []
+    for preview, incoming_entry in parsed_items:
+        if key_counts[preview["key"]] > 1:
+            preview["status"] = "duplicate-key"
+            preview["exists"] = False
+            preview["selected"] = False
+            preview["conflict"] = {"message": f"The uploaded file contains {key_counts[preview['key']]} entries with this citation key."}
+            previews.append(preview)
+            continue
         existing_entry = existing_entries.get(preview["key"])
         if existing_entry is None:
             preview["status"] = "new"
@@ -756,6 +770,19 @@ def api_import_entries():
     if not isinstance(selected_entries, list) or not selected_entries:
         abort(400, "No entries selected for import")
 
+    parsed_entries = []
+    for raw in selected_entries:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        parsed = load_biblatex(raw).entries
+        if len(parsed) != 1 or not parsed[0].get("ID"):
+            abort(400, "Each imported item must be one valid BibLaTeX entry with a citation key")
+        parsed_entries.append(parsed[0])
+    key_counts = Counter(entry["ID"] for entry in parsed_entries)
+    duplicate_keys = sorted(key for key, count in key_counts.items() if count > 1)
+    if duplicate_keys:
+        abort(409, f"Import contains duplicate citation keys: {', '.join(duplicate_keys)}")
+
     existing_entries = {
         entry.get("ID"): entry
         for entry in bibstore.load_bib().entries
@@ -764,13 +791,7 @@ def api_import_entries():
     imported_count = 0
     updated_count = 0
     unchanged_count = 0
-    for raw in selected_entries:
-        if not isinstance(raw, str) or not raw.strip():
-            continue
-        parsed = bibtexparser.loads(raw).entries
-        if len(parsed) != 1:
-            continue
-        incoming_entry = parsed[0]
+    for incoming_entry in parsed_entries:
         key = incoming_entry.get("ID")
         existing_entry = existing_entries.get(key)
         if existing_entry is None:
@@ -782,12 +803,8 @@ def api_import_entries():
 
     db = bibstore.load_bib()
     by_key = {entry.get("ID"): entry for entry in db.entries if entry.get("ID")}
-    for raw in selected_entries:
-        if not isinstance(raw, str) or not raw.strip():
-            continue
-        parsed = bibtexparser.loads(raw).entries
-        if len(parsed) == 1 and parsed[0].get("ID"):
-            by_key[parsed[0]["ID"]] = parsed[0]
+    for incoming_entry in parsed_entries:
+        by_key[incoming_entry["ID"]] = incoming_entry
     db.entries = list(by_key.values())
     bibstore.save_bib(db, action="import")
     stats = {"after_dedupe": len(db.entries)}
@@ -955,8 +972,7 @@ def api_scan_apply():
     if basis_signature and _entry_signature(existing_entry) != basis_signature:
         abort(409, "Entry changed since the scan ran; rerun the scan before applying this patch")
 
-    parser = bibtexparser.bparser.BibTexParser(common_strings=True)
-    newdb = bibtexparser.loads(raw, parser=parser)
+    newdb = load_biblatex(raw)
     if len(newdb.entries) != 1:
         abort(400, "Invalid proposed entry")
 
@@ -1012,16 +1028,19 @@ def api_delete_database_orphans():
 
 @api_bp.route("/scan/citation-key-integrity/repair", methods=["POST"])
 def api_repair_citation_key_integrity():
-    entry_id = (request.json or {}).get("entry_id")
-    if entry_id is None:
-        abort(400, "Database entry is required")
-    try:
-        result = bibstore.get_library().repair_canonical_key(entry_id)
-    except KeyError:
-        abort(404, "Database entry not found")
-    for filename in result["filenames"]:
+    entry_ids = (request.json or {}).get("entry_ids", [])
+    if not isinstance(entry_ids, list) or not entry_ids:
+        abort(400, "At least one database entry is required")
+    results = []
+    for entry_id in entry_ids:
+        try:
+            results.append(bibstore.get_library().repair_canonical_key(entry_id))
+        except KeyError:
+            abort(404, "Database entry not found")
+    filenames = {filename for result in results for filename in result["filenames"]}
+    for filename in filenames:
         bibstore.get_library().refresh_projection(filename, bibstore.BIB_DIR / filename)
-    return jsonify({"ok": True, **result})
+    return jsonify({"ok": True, "repaired": len(results), "results": results})
 
 
 @api_bp.route("/scan/orphans/action", methods=["POST"])
