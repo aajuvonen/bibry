@@ -1020,11 +1020,11 @@ class DatabaseOrphanScanner:
 
 class CitationKeyIntegrityScanner:
     service_name = "citation-key-integrity"
-    display_name = "Citation Key Integrity"
+    display_name = "Catalogue Integrity"
     phase_name = "phase6_citation_key_integrity"
 
     def availability(self):
-        return {"available": True, "reason": "Finds legacy citation-key aliases and collisions."}
+        return {"available": True, "reason": "Finds legacy citation-key aliases and same-work variants for reviewed cleanup."}
 
     def scan_entries(self, entries_by_key=None):
         items = []
@@ -1040,7 +1040,28 @@ class CitationKeyIntegrityScanner:
                 "proposed_key": issue["proposed_key"], "old_keys": issue["keys"],
                 "pdf_keys": issue["pdf_keys"],
             })
-        return {"items": items, "count": len(items), "scope": "global-catalogue"}
+        duplicate_groups = []
+        for group in bibstore.get_library().duplicate_variant_groups():
+            variants = []
+            for variant in group["variants"]:
+                entry = bibstore.get_library()._decode(variant["fields"], variant["canonical_key"] or "Entry",
+                                                        variant["entry_type"])
+                variants.append({
+                    "entry_id": variant["entry_id"], "key": entry.get("ID"),
+                    "title": _clean_text(entry.get("title")),
+                    "type": (entry.get("ENTRYTYPE") or "misc").lower(),
+                    "summary": " • ".join(filter(None, [_clean_text(entry.get("author") or entry.get("editor")),
+                                                           _clean_text(entry.get("year"))])),
+                    "raw": bibstore.get_library()._encode(entry),
+                    "reference_count": variant["reference_count"],
+                    "created_at": variant["created_at"], "updated_at": variant["updated_at"],
+                })
+            first = variants[0]
+            duplicate_groups.append({"id": f"duplicate-work:{group['work_id']}", "work_id": group["work_id"],
+                                     "key": first["key"], "title": first["title"], "summary": first["summary"],
+                                     "variants": variants})
+        return {"items": items, "count": len(items), "duplicate_groups": duplicate_groups,
+                "duplicate_count": len(duplicate_groups), "scope": "global-catalogue"}
 
 
 SCAN_SERVICES = {

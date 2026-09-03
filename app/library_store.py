@@ -404,6 +404,80 @@ class LibraryStore:
                                "proposed_key": proposed, "pdf_keys": pdf_keys})
         return issues
 
+    def duplicate_variant_groups(self):
+        """Return review candidates which resolve to the same bibliographic work.
+
+        A shared work identity is deliberately only a candidate signal: variants can
+        be intentional.  Callers must therefore present these groups for an explicit
+        survivor choice rather than merging them automatically.
+        """
+        with self.session() as db:
+            groups = db.execute("""SELECT e.work_id, w.identity
+                FROM entries e JOIN works w ON w.id=e.work_id
+                GROUP BY e.work_id HAVING COUNT(*) > 1 ORDER BY e.work_id""").fetchall()
+            result = []
+            for group in groups:
+                rows = db.execute("""SELECT e.id entry_id, e.fields, e.entry_type,
+                    e.canonical_key, e.created_at, e.updated_at,
+                    COUNT(m.bibliography_id) reference_count
+                    FROM entries e LEFT JOIN bibliography_entries m ON m.entry_id=e.id
+                    WHERE e.work_id=? GROUP BY e.id
+                    ORDER BY reference_count DESC, e.updated_at DESC, e.id""",
+                                  (group["work_id"],)).fetchall()
+                result.append({"work_id": group["work_id"], "identity": group["identity"],
+                               "variants": [dict(row) for row in rows]})
+        return result
+
+    def merge_variant_entries(self, keep_entry_id, merge_entry_ids):
+        """Merge reviewed same-work variants into the selected surviving entry."""
+        keep_entry_id = int(keep_entry_id)
+        merge_entry_ids = list(dict.fromkeys(int(entry_id) for entry_id in merge_entry_ids
+                                              if int(entry_id) != keep_entry_id))
+        if not merge_entry_ids:
+            raise ValueError("Choose at least one different variant to merge")
+        placeholders = ",".join("?" for _ in merge_entry_ids)
+        with self.session() as db:
+            keeper = db.execute("SELECT id, work_id, canonical_key FROM entries WHERE id=?",
+                                (keep_entry_id,)).fetchone()
+            if not keeper:
+                raise KeyError("Surviving database entry not found")
+            if keeper["work_id"] is None:
+                raise ValueError("This entry has no shared work identity")
+            variants = db.execute(f"SELECT id, work_id FROM entries WHERE id IN ({placeholders})",
+                                  merge_entry_ids).fetchall()
+            if len(variants) != len(merge_entry_ids) or any(row["work_id"] != keeper["work_id"] for row in variants):
+                raise ValueError("Only variants from the same reviewed work can be merged")
+            if not keeper["canonical_key"]:
+                raise ValueError("Repair this entry's citation key before merging variants")
+
+            memberships = db.execute(f"""SELECT m.bibliography_id, m.entry_id, b.filename
+                FROM bibliography_entries m JOIN bibliographies b ON b.id=m.bibliography_id
+                WHERE m.entry_id IN ({placeholders})""", merge_entry_ids).fetchall()
+            filenames = set()
+            for membership in memberships:
+                bibliography_id = membership["bibliography_id"]
+                filename = membership["filename"]
+                conflict = db.execute("""SELECT entry_id FROM bibliography_entries
+                    WHERE bibliography_id=? AND citation_key=? COLLATE NOCASE AND entry_id NOT IN (?, ?)""",
+                                      (bibliography_id, keeper["canonical_key"], keep_entry_id,
+                                       membership["entry_id"])).fetchone()
+                if conflict:
+                    raise ValueError(f"Cannot merge: {filename} already uses {keeper['canonical_key']}")
+                existing = db.execute("""SELECT 1 FROM bibliography_entries
+                    WHERE bibliography_id=? AND entry_id=?""", (bibliography_id, keep_entry_id)).fetchone()
+                if existing:
+                    db.execute("DELETE FROM bibliography_entries WHERE bibliography_id=? AND entry_id=?",
+                               (bibliography_id, membership["entry_id"]))
+                else:
+                    db.execute("""UPDATE bibliography_entries SET entry_id=?, citation_key=?
+                        WHERE bibliography_id=? AND entry_id=?""",
+                               (keep_entry_id, keeper["canonical_key"], bibliography_id,
+                                membership["entry_id"]))
+                filenames.add(filename)
+            db.execute(f"DELETE FROM entries WHERE id IN ({placeholders})", merge_entry_ids)
+        return {"entry_id": keep_entry_id, "merged_entry_ids": merge_entry_ids,
+                "filenames": sorted(filenames)}
+
     def repair_canonical_key(self, entry_id):
         return self.repair_canonical_keys([entry_id])[0]
 

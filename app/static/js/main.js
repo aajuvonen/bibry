@@ -28,6 +28,7 @@ import {
   editDatabaseEntry,
   deleteDatabaseOrphans,
   repairCitationKeyIntegrity,
+  mergeCatalogueVariants,
   searchLibraryEntries,
   addLibraryEntry,
 } from "./api.js";
@@ -1735,19 +1736,109 @@ function openCitationKeyIntegrityPicker(result) {
     meta: pickerMeta([item.meta, `current: ${(item.old_keys || []).join(", ")}`, item.pdf_keys?.length ? "PDF requires review" : ""]),
     selected: true,
   }));
+  if (!items.length && result.duplicate_groups?.length) {
+    openCatalogueVariantGroupPicker(result.duplicate_groups);
+    return;
+  }
   openPicker({
     mode: "citation-key-integrity",
-    title: "Citation Key Integrity",
-    subtitle: "Review proposed globally unique keys. Existing PDFs are never renamed automatically.",
+    title: "Catalogue Integrity",
+    subtitle: `${items.length} key repair${items.length === 1 ? "" : "s"} • ${result.duplicate_count || 0} same-work variant group${result.duplicate_count === 1 ? "" : "s"}. PDFs are never renamed automatically.`,
     confirmText: "Repair Selected",
     emptyMessage: "All catalogue entries already have unambiguous global citation keys.",
     items,
     singleSelect: false,
+    keepConfirm: true,
+    actions: result.duplicate_groups?.length ? [{
+      label: `Review ${result.duplicate_groups.length} Variant Group${result.duplicate_groups.length === 1 ? "" : "s"}`,
+      className: "btn btn-sm btn-outline-primary",
+      requiresSelection: false,
+      onClick: async () => {
+        closePicker();
+        openCatalogueVariantGroupPicker(result.duplicate_groups);
+      },
+    }] : [],
     onConfirm: async (selected) => {
       const response = await repairCitationKeyIntegrity(selected.map((item) => item.entry_id));
       if (!response.ok) throw new Error(response.description || response.error || "Failed to repair citation keys");
       await loadEntries({ database: databaseView });
       showToast(`Repaired ${response.repaired || selected.length} citation key${selected.length === 1 ? "" : "s"}`);
+    },
+  });
+}
+
+function renderCatalogueVariantPreview(item) {
+  return `
+    <div class="text-muted small mb-2">Keeping this record moves bibliography memberships from the other variants to <strong>${escapeHtml(item.key)}</strong>. PDFs named after discarded keys are left untouched.</div>
+    <div class="small text-muted mb-1">Full BibLaTeX record (read-only)</div>
+    <pre class="scan-current-raw">${escapeHtml(item.raw || "")}</pre>
+  `;
+}
+
+function openCatalogueVariantGroupPicker(groups) {
+  const items = groups.map((group, index) => ({
+    ...group,
+    key: group.key || `work ${group.work_id}`,
+    title: group.title || "(Untitled work)",
+    meta: pickerMeta([group.summary, `${group.variants.length} variants`]),
+    badge: "Review variants",
+    selected: index === 0,
+    searchText: [group.key, group.title, group.summary, ...group.variants.flatMap((variant) => [variant.key, variant.title, variant.summary])].join(" ").toLowerCase(),
+  }));
+  openPicker({
+    mode: "catalogue-duplicate-groups",
+    title: "Same-work Variants",
+    subtitle: "These records share a DOI, arXiv identifier, or normalized title/author/year identity. Review each group; intentional variants can be retained.",
+    emptyMessage: "No same-work variant groups found.",
+    items,
+    singleSelect: true,
+    actions: [{
+      label: "Choose Survivor",
+      className: "btn btn-sm btn-primary",
+      onClick: async (group) => {
+        closePicker();
+        openCatalogueVariantSurvivorPicker(group);
+      },
+    }],
+  });
+}
+
+function openCatalogueVariantSurvivorPicker(group) {
+  const items = group.variants.map((variant, index) => ({
+    ...variant,
+    id: `variant-${variant.entry_id}`,
+    meta: pickerMeta([variant.summary, variant.type, `${variant.reference_count || 0} bibliography reference${variant.reference_count === 1 ? "" : "s"}`]),
+    badge: index === 0 ? "Suggested survivor" : "Variant",
+    selected: index === 0,
+    searchText: [variant.key, variant.title, variant.summary, variant.raw].join(" ").toLowerCase(),
+  }));
+  openPicker({
+    mode: "catalogue-duplicate-survivor",
+    title: "Choose the Surviving Record",
+    subtitle: `Select one record to keep. The other ${Math.max(0, items.length - 1)} record${items.length === 2 ? "" : "s"} will be merged into it.`,
+    confirmText: "Keep Selected and Merge",
+    emptyMessage: "No variants found.",
+    items,
+    singleSelect: true,
+    showPreview: true,
+    previewLabel: "Variant record",
+    previewEmptyText: "Select the record to keep.",
+    previewRenderer: renderCatalogueVariantPreview,
+    onConfirm: async (selected) => {
+      const survivor = selected[0];
+      const losers = items.filter((item) => item.entry_id !== survivor.entry_id);
+      if (!losers.length) throw new Error("No variant is available to merge");
+      const confirmed = await showConfirmDialog(
+        "Merge Same-work Variants",
+        `Keep ${survivor.key} and merge ${losers.length} other record${losers.length === 1 ? "" : "s"} into it? Their database records will be removed; PDFs will not be renamed or deleted.`,
+        "Merge Records",
+        "btn-danger",
+      );
+      if (!confirmed) throw new Error("Merge cancelled");
+      const response = await mergeCatalogueVariants(survivor.entry_id, losers.map((item) => item.entry_id));
+      if (!response.ok) throw new Error(response.description || response.error || "Failed to merge variants");
+      await loadEntries({ database: databaseView });
+      showToast(`Kept ${survivor.key} and merged ${response.merged_entry_ids?.length || losers.length} variant${losers.length === 1 ? "" : "s"}. Run Catalogue Integrity again to review remaining groups.`);
     },
   });
 }

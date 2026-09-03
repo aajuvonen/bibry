@@ -1024,6 +1024,24 @@ def api_repair_citation_key_integrity():
     return jsonify({"ok": True, "repaired": len(results), "results": results})
 
 
+@api_bp.route("/scan/catalogue-duplicates/merge", methods=["POST"])
+def api_merge_catalogue_duplicates():
+    payload = request.json or {}
+    keep_entry_id = payload.get("keep_entry_id")
+    merge_entry_ids = payload.get("merge_entry_ids", [])
+    if not isinstance(merge_entry_ids, list) or keep_entry_id is None:
+        abort(400, "Choose a surviving entry and at least one variant to merge")
+    try:
+        result = bibstore.get_library().merge_variant_entries(keep_entry_id, merge_entry_ids)
+    except KeyError as exc:
+        abort(404, str(exc))
+    except (TypeError, ValueError) as exc:
+        abort(409, str(exc))
+    for filename in result["filenames"]:
+        bibstore.get_library().refresh_projection(filename, bibstore.BIB_DIR / filename)
+    return jsonify({"ok": True, **result})
+
+
 @api_bp.route("/scan/orphans/action", methods=["POST"])
 def api_orphan_action():
     payload = request.json or {}

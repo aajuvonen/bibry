@@ -34,7 +34,7 @@ Import and export both pass the resulting bibliography through the sort/dedupe r
 
 Bibry includes a `Scan` launcher in the toolbar. Scans never mutate the `.bib` file automatically. Every suggested change is reviewed first.
 
-The Scan launcher includes **Database Orphans**, which lists database entries not referenced by any bibliography. Deletion requires selecting entries, confirming the count, and typing the requested confirmation text. It also includes **Citation Key Integrity**, a guided repair for legacy key aliases or clashes; PDF files are never renamed automatically by this repair.
+The Scan launcher includes **Database Orphans**, which lists database entries not referenced by any bibliography. Deletion requires selecting entries, confirming the count, and typing the requested confirmation text. It also includes **Catalogue Integrity**: a guided repair for legacy citation-key aliases plus a review-first same-work variant cleanup. For each candidate group, choose the one record to retain; Bibry moves bibliography memberships to it and deletes only the explicitly merged database variants. PDFs are never renamed or deleted by this cleanup.
 
 ### Crossref Scan
 

@@ -194,6 +194,15 @@ export async function repairCitationKeyIntegrity(entryIds) {
   return await parseResponse(res);
 }
 
+export async function mergeCatalogueVariants(keepEntryId, mergeEntryIds) {
+  const res = await fetch("/api/scan/catalogue-duplicates/merge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keep_entry_id: keepEntryId, merge_entry_ids: mergeEntryIds }),
+  });
+  return await parseResponse(res);
+}
+
 export async function fetchRawEntry(key) {
   const res = await fetch(`/api/entry/${key}`);
   return await res.json();
