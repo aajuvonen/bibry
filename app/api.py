@@ -364,6 +364,10 @@ def _valid_citation_key(key):
     return bool(re.fullmatch(r"[^\s,{}]+", str(key or "")))
 
 
+def _citation_key_identity(key):
+    return str(key or "").casefold()
+
+
 def _move_pdf_for_key_change(old_key, new_key):
     if not old_key or not new_key or old_key == new_key:
         return False
@@ -717,7 +721,7 @@ def api_import_preview():
         abort(400, "No BibTeX entries found in file")
 
     existing_entries = {
-        entry.get("ID"): entry
+        _citation_key_identity(entry.get("ID")): entry
         for entry in bibstore.load_bib().entries
         if entry.get("ID")
     }
@@ -732,18 +736,19 @@ def api_import_preview():
         if len(parsed) != 1 or not parsed[0].get("ID"):
             abort(400, f"Could not parse a BibLaTeX entry: {preview['key'] or raw[:40]}")
         parsed_items.append((preview, parsed[0]))
-        key_counts[preview["key"]] = key_counts.get(preview["key"], 0) + 1
+        identity = _citation_key_identity(preview["key"])
+        key_counts[identity] = key_counts.get(identity, 0) + 1
 
     previews = []
     for preview, incoming_entry in parsed_items:
-        if key_counts[preview["key"]] > 1:
+        if key_counts[_citation_key_identity(preview["key"])] > 1:
             preview["status"] = "duplicate-key"
             preview["exists"] = False
             preview["selected"] = False
-            preview["conflict"] = {"message": f"The uploaded file contains {key_counts[preview['key']]} entries with this citation key."}
+            preview["conflict"] = {"message": f"The uploaded file contains {key_counts[_citation_key_identity(preview['key'])]} entries with this citation key (case-insensitive)."}
             previews.append(preview)
             continue
-        existing_entry = existing_entries.get(preview["key"])
+        existing_entry = existing_entries.get(_citation_key_identity(preview["key"]))
         if existing_entry is None:
             preview["status"] = "new"
             preview["exists"] = False
@@ -778,13 +783,14 @@ def api_import_entries():
         if len(parsed) != 1 or not parsed[0].get("ID"):
             abort(400, "Each imported item must be one valid BibLaTeX entry with a citation key")
         parsed_entries.append(parsed[0])
-    key_counts = Counter(entry["ID"] for entry in parsed_entries)
-    duplicate_keys = sorted(key for key, count in key_counts.items() if count > 1)
+    key_counts = Counter(_citation_key_identity(entry["ID"]) for entry in parsed_entries)
+    duplicate_keys = sorted(entry["ID"] for entry in parsed_entries if key_counts[_citation_key_identity(entry["ID"])] > 1)
+    duplicate_keys = list(dict.fromkeys(duplicate_keys))
     if duplicate_keys:
         abort(409, f"Import contains duplicate citation keys: {', '.join(duplicate_keys)}")
 
     existing_entries = {
-        entry.get("ID"): entry
+        _citation_key_identity(entry.get("ID")): entry
         for entry in bibstore.load_bib().entries
         if entry.get("ID")
     }
@@ -792,7 +798,7 @@ def api_import_entries():
     updated_count = 0
     unchanged_count = 0
     for incoming_entry in parsed_entries:
-        key = incoming_entry.get("ID")
+        key = _citation_key_identity(incoming_entry.get("ID"))
         existing_entry = existing_entries.get(key)
         if existing_entry is None:
             imported_count += 1
@@ -802,9 +808,13 @@ def api_import_entries():
             updated_count += 1
 
     db = bibstore.load_bib()
-    by_key = {entry.get("ID"): entry for entry in db.entries if entry.get("ID")}
+    by_key = {_citation_key_identity(entry.get("ID")): entry for entry in db.entries if entry.get("ID")}
     for incoming_entry in parsed_entries:
-        by_key[incoming_entry["ID"]] = incoming_entry
+        identity = _citation_key_identity(incoming_entry["ID"])
+        existing = by_key.get(identity)
+        if existing:
+            incoming_entry = {**incoming_entry, "ID": existing["ID"]}
+        by_key[identity] = incoming_entry
     db.entries = list(by_key.values())
     bibstore.save_bib(db, action="import")
     stats = {"after_dedupe": len(db.entries)}
@@ -1031,12 +1041,10 @@ def api_repair_citation_key_integrity():
     entry_ids = (request.json or {}).get("entry_ids", [])
     if not isinstance(entry_ids, list) or not entry_ids:
         abort(400, "At least one database entry is required")
-    results = []
-    for entry_id in entry_ids:
-        try:
-            results.append(bibstore.get_library().repair_canonical_key(entry_id))
-        except KeyError:
-            abort(404, "Database entry not found")
+    try:
+        results = bibstore.get_library().repair_canonical_keys(entry_ids)
+    except KeyError:
+        abort(404, "Database entry not found")
     filenames = {filename for result in results for filename in result["filenames"]}
     for filename in filenames:
         bibstore.get_library().refresh_projection(filename, bibstore.BIB_DIR / filename)

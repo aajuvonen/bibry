@@ -140,6 +140,10 @@ class LibraryStore:
     @staticmethod
     def _key_base(entry):
         key = re.sub(r"\s+", "", str(entry.get("ID") or ""))
+        # Keep custom keys untouched, but make conventional surname-year keys
+        # consistently sentence-cased (juvonen2026 -> Juvonen2026).
+        if re.fullmatch(r"[A-Za-z][A-Za-z-]*\d{4}[A-Za-z]*", key):
+            key = key[:1].upper() + key[1:]
         return key or "Entry"
 
     def _available_canonical_key(self, db, desired, entry_id=None):
@@ -366,14 +370,17 @@ class LibraryStore:
             rows = db.execute("""SELECT e.id entry_id, e.fields, e.entry_type, e.canonical_key,
                 GROUP_CONCAT(DISTINCT m.citation_key) keys
                 FROM entries e LEFT JOIN bibliography_entries m ON m.entry_id=e.id
-                GROUP BY e.id HAVING e.canonical_key IS NULL
+                GROUP BY e.id
                 ORDER BY e.id""").fetchall()
             issues = []
             for row in rows:
                 keys = [key for key in (row["keys"] or "").split(",") if key]
                 if not keys:
                     continue
-                proposed = self._available_canonical_key(db, keys[0], row["entry_id"])
+                normalized_existing = self._key_base({"ID": row["canonical_key"]}) if row["canonical_key"] else None
+                if row["canonical_key"] and row["canonical_key"] == normalized_existing:
+                    continue
+                proposed = normalized_existing or self._available_canonical_key(db, keys[0], row["entry_id"])
                 pdf_keys = [key for key in keys if (self.root / "pdf" / f"{key}.pdf").exists()]
                 issues.append({"entry_id": row["entry_id"], "fields": row["fields"],
                                "entry_type": row["entry_type"], "keys": keys,
@@ -381,21 +388,85 @@ class LibraryStore:
         return issues
 
     def repair_canonical_key(self, entry_id):
+        return self.repair_canonical_keys([entry_id])[0]
+
+    def repair_canonical_keys(self, entry_ids):
+        """Repair a reviewed group atomically, avoiding transient key clashes."""
+        entry_ids = list(dict.fromkeys(int(entry_id) for entry_id in entry_ids))
+        if not entry_ids:
+            return []
+        placeholders = ",".join("?" for _ in entry_ids)
         with self.session() as db:
-            row = db.execute("SELECT canonical_key FROM entries WHERE id=?", (int(entry_id),)).fetchone()
-            if not row:
-                raise KeyError(entry_id)
-            memberships = db.execute("SELECT citation_key, bibliography_id FROM bibliography_entries WHERE entry_id=?",
-                                     (int(entry_id),)).fetchall()
-            if not memberships:
-                return {"key": row["canonical_key"], "filenames": [], "old_keys": []}
-            key = row["canonical_key"] or self._available_canonical_key(db, memberships[0]["citation_key"], int(entry_id))
-            old_keys = sorted({membership["citation_key"] for membership in memberships})
-            db.execute("UPDATE entries SET canonical_key=? WHERE id=?", (key, int(entry_id)))
-            db.execute("UPDATE bibliography_entries SET citation_key=? WHERE entry_id=?", (key, int(entry_id)))
-            filenames = db.execute("""SELECT DISTINCT b.filename FROM bibliography_entries m
-                JOIN bibliographies b ON b.id=m.bibliography_id WHERE m.entry_id=?""", (int(entry_id),)).fetchall()
-        return {"key": key, "filenames": [row["filename"] for row in filenames], "old_keys": old_keys}
+            entries = db.execute(f"SELECT id, canonical_key FROM entries WHERE id IN ({placeholders})", entry_ids).fetchall()
+            if len(entries) != len(entry_ids):
+                raise KeyError("Database entry not found")
+            memberships = db.execute(f"""SELECT m.entry_id, m.citation_key, m.bibliography_id, b.filename
+                FROM bibliography_entries m JOIN bibliographies b ON b.id=m.bibliography_id
+                WHERE m.entry_id IN ({placeholders}) ORDER BY m.entry_id, m.position""", entry_ids).fetchall()
+            by_entry = {entry_id: [] for entry_id in entry_ids}
+            for membership in memberships:
+                by_entry[membership["entry_id"]].append(membership)
+
+            # Keys of entries not being repaired remain reserved.  Selected entries
+            # then claim their old key in stable order, with suffixes for the rest.
+            reserved_rows = db.execute(f"""SELECT DISTINCT m.citation_key FROM bibliography_entries m
+                WHERE m.entry_id NOT IN ({placeholders})""", entry_ids).fetchall()
+            reserved = {row["citation_key"].lower() for row in reserved_rows}
+            canonical_rows = db.execute(f"""SELECT canonical_key FROM entries
+                WHERE id NOT IN ({placeholders}) AND canonical_key IS NOT NULL""", entry_ids).fetchall()
+            reserved.update(row["canonical_key"].lower() for row in canonical_rows)
+
+            entry_rows = {row["id"]: row for row in entries}
+            assigned = {}
+            preferred = {}
+            # Existing canonical ownership wins over a legacy membership alias.
+            for entry_id in sorted(entry_ids):
+                existing = entry_rows[entry_id]["canonical_key"]
+                existing = self._key_base({"ID": existing}) if existing else None
+                if existing and existing.lower() not in reserved:
+                    assigned[entry_id] = existing
+                    reserved.add(existing.lower())
+                elif existing:
+                    preferred[entry_id] = existing
+
+            for entry_id in sorted(entry_ids):
+                if entry_id in assigned:
+                    continue
+                old_memberships = by_entry[entry_id]
+                desired = preferred.get(entry_id) or (old_memberships[0]["citation_key"] if old_memberships else "Entry")
+                candidate = self._key_base({"ID": desired})
+                suffix_index = 0
+                while candidate.lower() in reserved:
+                    suffix = ""
+                    value = suffix_index
+                    while True:
+                        suffix = chr(ord("a") + value % 26) + suffix
+                        value = value // 26 - 1
+                        if value < 0:
+                            break
+                    candidate = f"{self._key_base({'ID': desired})}{suffix}"
+                    suffix_index += 1
+                reserved.add(candidate.lower())
+                assigned[entry_id] = candidate
+
+            # Assign ownership first. Move memberships through unique temporary
+            # keys so swapping legacy aliases cannot violate a bibliography's
+            # (bibliography_id, citation_key) primary key mid-transaction.
+            for entry_id, key in assigned.items():
+                db.execute("UPDATE entries SET canonical_key=? WHERE id=?", (key, entry_id))
+            for entry_id in assigned:
+                db.execute("UPDATE bibliography_entries SET citation_key=? WHERE entry_id=?",
+                           (f"__bibry_repair_{entry_id}", entry_id))
+            for entry_id, key in assigned.items():
+                db.execute("UPDATE bibliography_entries SET citation_key=? WHERE entry_id=?", (key, entry_id))
+
+            results = []
+            for entry_id in entry_ids:
+                old_memberships = by_entry[entry_id]
+                results.append({"key": assigned[entry_id],
+                                "filenames": sorted({row["filename"] for row in old_memberships}),
+                                "old_keys": sorted({row["citation_key"] for row in old_memberships})})
+        return results
 
     def update_entry_globally(self, entry_id, entry):
         raw = self._encode(entry)
