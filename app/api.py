@@ -381,8 +381,6 @@ def _move_pdf_for_key_change(old_key, new_key):
 
 def _replace_entry_with_key(db, existing_index, key, new_entry, action):
     new_key = new_entry.get("ID") or key
-    if new_key != key and any(index != existing_index and entry.get("ID") == new_key for index, entry in enumerate(db.entries)):
-        abort(409, f"Entry '{new_key}' already exists")
     db.entries[existing_index] = new_entry
     bibstore.save_bib(db, action=action)
     canonical_key = db.entries[existing_index].get("ID") or new_key
@@ -701,9 +699,6 @@ def api_add_entry():
         abort(400, "Entry key is required")
 
     db = bibstore.load_bib()
-    if any(e.get("ID") == new_key for e in db.entries):
-        abort(409, f"Entry '{new_key}' already exists")
-
     db.entries.append(new_entry)
     bibstore.save_bib(db, action="add-entry")
     return jsonify({"ok": True, "key": db.entries[-1].get("ID", new_key)}), 201
@@ -720,11 +715,7 @@ def api_import_preview():
     if not raw_entries:
         abort(400, "No BibTeX entries found in file")
 
-    existing_entries = {
-        _citation_key_identity(entry.get("ID")): entry
-        for entry in bibstore.load_bib().entries
-        if entry.get("ID")
-    }
+    existing_signatures = {repr(_entry_signature(entry)) for entry in bibstore.load_bib().entries}
     parsed_items = []
     key_counts = {}
     for raw in raw_entries:
@@ -735,35 +726,32 @@ def api_import_preview():
         parsed = load_biblatex(raw).entries
         if len(parsed) != 1 or not parsed[0].get("ID"):
             abort(400, f"Could not parse a BibLaTeX entry: {preview['key'] or raw[:40]}")
+        source_key = preview["key"]
+        preview["source_key"] = source_key
+        preview["key"] = bibstore.get_library()._key_base(parsed[0])
         parsed_items.append((preview, parsed[0]))
-        identity = _citation_key_identity(preview["key"])
+        identity = _citation_key_identity(source_key)
         key_counts[identity] = key_counts.get(identity, 0) + 1
 
     previews = []
     for preview, incoming_entry in parsed_items:
-        if key_counts[_citation_key_identity(preview["key"])] > 1:
+        if key_counts[_citation_key_identity(preview.get("source_key"))] > 1:
             preview["status"] = "duplicate-key"
             preview["exists"] = False
             preview["selected"] = False
-            preview["conflict"] = {"message": f"The uploaded file contains {key_counts[_citation_key_identity(preview['key'])]} entries with this citation key (case-insensitive)."}
+            preview["conflict"] = {"message": f"The uploaded file contains {key_counts[_citation_key_identity(preview['source_key'])]} entries with this citation key (case-insensitive)."}
             previews.append(preview)
             continue
-        existing_entry = existing_entries.get(_citation_key_identity(preview["key"]))
-        if existing_entry is None:
-            preview["status"] = "new"
-            preview["exists"] = False
-            preview["selected"] = True
-            preview["conflict"] = None
-        elif _entry_signature(existing_entry) == _entry_signature(incoming_entry):
+        if repr(_entry_signature(incoming_entry)) in existing_signatures:
             preview["status"] = "same"
             preview["exists"] = True
             preview["selected"] = False
             preview["conflict"] = None
         else:
-            preview["status"] = "conflict"
-            preview["exists"] = True
-            preview["selected"] = False
-            preview["conflict"] = _entry_conflict(existing_entry, incoming_entry)
+            preview["status"] = "new"
+            preview["exists"] = False
+            preview["selected"] = True
+            preview["conflict"] = None
         previews.append(preview)
 
     return jsonify({"entries": previews})
@@ -789,33 +777,18 @@ def api_import_entries():
     if duplicate_keys:
         abort(409, f"Import contains duplicate citation keys: {', '.join(duplicate_keys)}")
 
-    existing_entries = {
-        _citation_key_identity(entry.get("ID")): entry
-        for entry in bibstore.load_bib().entries
-        if entry.get("ID")
-    }
+    existing_signatures = {repr(_entry_signature(entry)) for entry in bibstore.load_bib().entries}
     imported_count = 0
     updated_count = 0
     unchanged_count = 0
     for incoming_entry in parsed_entries:
-        key = _citation_key_identity(incoming_entry.get("ID"))
-        existing_entry = existing_entries.get(key)
-        if existing_entry is None:
-            imported_count += 1
-        elif _entry_signature(existing_entry) == _entry_signature(incoming_entry):
+        if repr(_entry_signature(incoming_entry)) in existing_signatures:
             unchanged_count += 1
         else:
-            updated_count += 1
+            imported_count += 1
 
     db = bibstore.load_bib()
-    by_key = {_citation_key_identity(entry.get("ID")): entry for entry in db.entries if entry.get("ID")}
-    for incoming_entry in parsed_entries:
-        identity = _citation_key_identity(incoming_entry["ID"])
-        existing = by_key.get(identity)
-        if existing:
-            incoming_entry = {**incoming_entry, "ID": existing["ID"]}
-        by_key[identity] = incoming_entry
-    db.entries = list(by_key.values())
+    db.entries.extend(parsed_entries)
     bibstore.save_bib(db, action="import")
     stats = {"after_dedupe": len(db.entries)}
 

@@ -107,6 +107,7 @@ project/
 * `.bib` files remain standalone, flat BibLaTeX projections suitable for LaTeX, version control, and backup
 * Identical entry data may be shared by several bibliographies
 * Every database entry has one catalogue-wide citation key; shared copies use it in every bibliography, while near-identical records receive distinct keys
+* Imported citation keys are treated as source metadata: Bibry derives canonical `AuthorYear` keys from author/editor and year, adding suffixes for variants
 * Editing an entry in one bibliography creates a local variant; use the share operation when the edited record should be reused elsewhere
 * `bib/` contains the available bibliography files
 * `bib/.active_bib` stores the currently selected bibliography filename

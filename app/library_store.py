@@ -14,6 +14,7 @@ from pathlib import Path
 import bibtexparser
 
 from .biblatex import load as load_biblatex_file, loads as load_biblatex
+from .latex import latex_to_text
 from .sort_dedupe_bibtex import process_bibtex_text
 
 
@@ -138,16 +139,27 @@ class LibraryStore:
         return cur.lastrowid
 
     @staticmethod
-    def _key_base(entry):
-        key = re.sub(r"\s+", "", str(entry.get("ID") or ""))
-        # Keep custom keys untouched, but make conventional surname-year keys
-        # consistently sentence-cased (juvonen2026 -> Juvonen2026).
-        if re.fullmatch(r"[A-Za-z][A-Za-z-]*\d{4}[A-Za-z]*", key):
-            key = key[:1].upper() + key[1:]
-        return key or "Entry"
+    def _key_token(value):
+        token = re.sub(r"[^A-Za-z0-9]+", "", latex_to_text(value or ""))
+        return token[:1].upper() + token[1:] if token else ""
+
+    @classmethod
+    def _key_base(cls, entry):
+        """Derive Bibry's key from bibliographic content, never source ID."""
+        people = latex_to_text(entry.get("author") or entry.get("editor") or "")
+        first = re.split(r"\s+and\s+", people, maxsplit=1)[0].strip()
+        if "," in first:
+            surname = first.split(",", 1)[0].strip()
+        else:
+            parts = first.split()
+            surname = parts[-1] if parts else ""
+        year_match = re.search(r"\d{4}", latex_to_text(entry.get("year") or entry.get("date") or ""))
+        surname_token = cls._key_token(surname)
+        year = year_match.group(0) if year_match else ""
+        return f"{surname_token}{year}" or surname_token or year or "Entry"
 
     def _available_canonical_key(self, db, desired, entry_id=None):
-        desired = self._key_base({"ID": desired})
+        desired = self._key_token(desired) or "Entry"
         candidate = desired
         suffix_index = 0
         while True:
@@ -211,14 +223,18 @@ class LibraryStore:
         with self.session() as db:
             bibliography_id = self._bibliography(db, filename)
             db.execute("DELETE FROM bibliography_entries WHERE bibliography_id=?", (bibliography_id,))
-            for position, entry in enumerate(entries):
+            seen_entry_ids = set()
+            for entry in entries:
                 key = entry.get("ID")
                 if not key:
                     continue
                 entry_id, canonical_key = self._entry_id(db, entry)
+                if entry_id in seen_entry_ids:
+                    continue
+                seen_entry_ids.add(entry_id)
                 db.execute("""INSERT INTO bibliography_entries
                     (bibliography_id,entry_id,citation_key,position) VALUES(?,?,?,?)""",
-                           (bibliography_id, entry_id, canonical_key, position))
+                           (bibliography_id, entry_id, canonical_key, len(normalized)))
                 normalized.append({**entry, "ID": canonical_key})
         return normalized
 
@@ -377,10 +393,11 @@ class LibraryStore:
                 keys = [key for key in (row["keys"] or "").split(",") if key]
                 if not keys:
                     continue
-                normalized_existing = self._key_base({"ID": row["canonical_key"]}) if row["canonical_key"] else None
-                if row["canonical_key"] and row["canonical_key"] == normalized_existing:
+                entry = self._decode(row["fields"], "", row["entry_type"])
+                expected_base = self._key_base(entry)
+                if row["canonical_key"] and re.fullmatch(rf"{re.escape(expected_base)}[a-z]*", row["canonical_key"]):
                     continue
-                proposed = normalized_existing or self._available_canonical_key(db, keys[0], row["entry_id"])
+                proposed = self._available_canonical_key(db, expected_base, row["entry_id"])
                 pdf_keys = [key for key in keys if (self.root / "pdf" / f"{key}.pdf").exists()]
                 issues.append({"entry_id": row["entry_id"], "fields": row["fields"],
                                "entry_type": row["entry_type"], "keys": keys,
@@ -397,7 +414,7 @@ class LibraryStore:
             return []
         placeholders = ",".join("?" for _ in entry_ids)
         with self.session() as db:
-            entries = db.execute(f"SELECT id, canonical_key FROM entries WHERE id IN ({placeholders})", entry_ids).fetchall()
+            entries = db.execute(f"SELECT id, canonical_key, fields, entry_type FROM entries WHERE id IN ({placeholders})", entry_ids).fetchall()
             if len(entries) != len(entry_ids):
                 raise KeyError("Database entry not found")
             memberships = db.execute(f"""SELECT m.entry_id, m.citation_key, m.bibliography_id, b.filename
@@ -416,25 +433,13 @@ class LibraryStore:
                 WHERE id NOT IN ({placeholders}) AND canonical_key IS NOT NULL""", entry_ids).fetchall()
             reserved.update(row["canonical_key"].lower() for row in canonical_rows)
 
-            entry_rows = {row["id"]: row for row in entries}
             assigned = {}
-            preferred = {}
-            # Existing canonical ownership wins over a legacy membership alias.
+            entry_rows = {row["id"]: row for row in entries}
             for entry_id in sorted(entry_ids):
-                existing = entry_rows[entry_id]["canonical_key"]
-                existing = self._key_base({"ID": existing}) if existing else None
-                if existing and existing.lower() not in reserved:
-                    assigned[entry_id] = existing
-                    reserved.add(existing.lower())
-                elif existing:
-                    preferred[entry_id] = existing
-
-            for entry_id in sorted(entry_ids):
-                if entry_id in assigned:
-                    continue
                 old_memberships = by_entry[entry_id]
-                desired = preferred.get(entry_id) or (old_memberships[0]["citation_key"] if old_memberships else "Entry")
-                candidate = self._key_base({"ID": desired})
+                row = entry_rows[entry_id]
+                desired = self._key_base(self._decode(row["fields"], "", row["entry_type"]))
+                candidate = desired
                 suffix_index = 0
                 while candidate.lower() in reserved:
                     suffix = ""
@@ -444,14 +449,15 @@ class LibraryStore:
                         value = value // 26 - 1
                         if value < 0:
                             break
-                    candidate = f"{self._key_base({'ID': desired})}{suffix}"
+                    candidate = f"{desired}{suffix}"
                     suffix_index += 1
                 reserved.add(candidate.lower())
                 assigned[entry_id] = candidate
 
-            # Assign ownership first. Move memberships through unique temporary
+            # Clear existing ownership first. Move memberships through unique temporary
             # keys so swapping legacy aliases cannot violate a bibliography's
             # (bibliography_id, citation_key) primary key mid-transaction.
+            db.execute(f"UPDATE entries SET canonical_key=NULL WHERE id IN ({placeholders})", entry_ids)
             for entry_id, key in assigned.items():
                 db.execute("UPDATE entries SET canonical_key=? WHERE id=?", (key, entry_id))
             for entry_id in assigned:
